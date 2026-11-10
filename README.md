@@ -81,3 +81,7 @@ writing of USE/keyword changes (hoard prints the line to add instead).
 cargo build --release
 sudo install -m755 target/release/hoard /usr/local/bin/hoard
 ```
+
+## License
+
+BSD-2-Clause, see [LICENSE](LICENSE).

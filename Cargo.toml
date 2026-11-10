@@ -2,8 +2,8 @@
 name = "simple-packagem-anaging-system"
 version = "0.1.0"
 edition = "2024"
+license = "BSD-2-Clause"
 description = "SimplePackagemAnagingSystem (SPAS): a native package manager for Gentoo repositories"
-license = "GPL-2.0-only"
 
 [[bin]]
 name = "hoard"
