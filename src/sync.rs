@@ -111,7 +111,16 @@ fn sync_git(r: &Repo, verify: bool) -> Result<(), String> {
         if r.sync_uri.is_empty() {
             return Err(format!("{}: no sync-uri", r.name));
         }
-        run(Command::new("git").args(["clone", "--depth", "1", &r.sync_uri]).arg(&r.location))?;
+        if let Some(parent) = r.location.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        let depth = r.settings.get("sync-depth").cloned().unwrap_or_else(|| "1".into());
+        let mut c = Command::new("git");
+        c.arg("clone");
+        if depth != "0" {
+            c.args(["--depth", &depth]);
+        }
+        run(c.arg(&r.sync_uri).arg(&r.location))?;
         if verify {
             if let Err(e) = verify_git_head(r) {
                 let _ = std::fs::remove_dir_all(&r.location);

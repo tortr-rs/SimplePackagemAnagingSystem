@@ -130,40 +130,71 @@ fn layout_conf(loc: &Path) -> HashMap<String, String> {
     m
 }
 
+/// repos.conf sections (built-in gentoo default, then /etc/portage/repos.conf).
+fn repos_conf(config_root: &Path) -> BTreeMap<String, HashMap<String, String>> {
+    let mut sections: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
+    // built-in default for the gentoo repository, same as Portage ships
+    sections.insert(
+        "DEFAULT".into(),
+        [("main-repo".to_string(), "gentoo".to_string())].into_iter().collect(),
+    );
+    sections.insert(
+        "gentoo".into(),
+        [
+            ("location", "/var/db/repos/gentoo"),
+            ("sync-type", "rsync"),
+            ("sync-uri", "rsync://rsync.gentoo.org/gentoo-portage"),
+            ("sync-openpgp-key-path", "/usr/share/openpgp-keys/gentoo-release.asc"),
+        ]
+        .into_iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect(),
+    );
+    let rc = config_root.join("etc/portage/repos.conf");
+    let mut texts = Vec::new();
+    if rc.is_dir() {
+        for f in crate::util::sorted_config_files(&rc) {
+            texts.push(std::fs::read_to_string(&f).unwrap_or_default());
+        }
+    } else if rc.is_file() {
+        texts.push(std::fs::read_to_string(&rc).unwrap_or_default());
+    }
+    for t in texts {
+        for (s, kv) in parse_ini(&t) {
+            sections.entry(s).or_default().extend(kv);
+        }
+    }
+    sections
+}
+
+/// Every repository repos.conf configures, including ones not fetched yet,
+/// with the main repo's name. Used by sync, which must clone missing ones.
+pub fn sync_targets(config_root: &Path) -> (String, Vec<Repo>) {
+    let sections = repos_conf(config_root);
+    let main = sections.get("DEFAULT").and_then(|d| d.get("main-repo")).cloned().unwrap_or("gentoo".into());
+    let mut out = Vec::new();
+    for (sect, kv) in &sections {
+        if sect == "DEFAULT" {
+            continue;
+        }
+        let Some(loc) = kv.get("location") else { continue };
+        out.push(Repo {
+            name: sect.clone(),
+            location: PathBuf::from(loc),
+            masters: vec![],
+            priority: 0,
+            sync_type: kv.get("sync-type").cloned().unwrap_or_default(),
+            sync_uri: kv.get("sync-uri").cloned().unwrap_or_default(),
+            settings: kv.clone(),
+            eclass_dirs: vec![],
+        });
+    }
+    (main, out)
+}
+
 impl Repos {
     pub fn load(config_root: &Path) -> Result<Repos, String> {
-        let mut sections: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
-        // built-in default for the gentoo repository, same as Portage ships
-        sections.insert(
-            "DEFAULT".into(),
-            [("main-repo".to_string(), "gentoo".to_string())].into_iter().collect(),
-        );
-        sections.insert(
-            "gentoo".into(),
-            [
-                ("location", "/var/db/repos/gentoo"),
-                ("sync-type", "rsync"),
-                ("sync-uri", "rsync://rsync.gentoo.org/gentoo-portage"),
-                ("sync-openpgp-key-path", "/usr/share/openpgp-keys/gentoo-release.asc"),
-            ]
-            .into_iter()
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .collect(),
-        );
-        let rc = config_root.join("etc/portage/repos.conf");
-        let mut texts = Vec::new();
-        if rc.is_dir() {
-            for f in crate::util::sorted_config_files(&rc) {
-                texts.push(std::fs::read_to_string(&f).unwrap_or_default());
-            }
-        } else if rc.is_file() {
-            texts.push(std::fs::read_to_string(&rc).unwrap_or_default());
-        }
-        for t in texts {
-            for (s, kv) in parse_ini(&t) {
-                sections.entry(s).or_default().extend(kv);
-            }
-        }
+        let sections = repos_conf(config_root);
         let main = sections.get("DEFAULT").and_then(|d| d.get("main-repo")).cloned().unwrap_or("gentoo".into());
         let mut list = Vec::new();
         for (sect, kv) in &sections {

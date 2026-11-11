@@ -273,14 +273,27 @@ fn run(cmd: &str, a: &Args, root: &Path) -> Result<i32, String> {
         "autoremove" | "depclean" => cmd_autoremove(&Config::load(root)?, a),
         "sync" => {
             need_root()?;
-            let cfg = Config::load(root)?;
+            // straight from repos.conf: overlays that were never fetched have
+            // no tree yet, so the loaded configuration doesn't know them
+            let config_root = PathBuf::from(std::env::var("PORTAGE_CONFIGROOT").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/".into()));
+            let (main, repos) = repo::sync_targets(&config_root);
             let _l = util::lock(Path::new("/var/lib/spas/lock"))?;
             let mut failed = false;
-            for r in &cfg.repos.list {
+            for name in &a.pos {
+                if !repos.iter().any(|r| &r.name == name) {
+                    error(&format!("{name}: not in repos.conf"));
+                    failed = true;
+                }
+            }
+            for r in &repos {
                 if !a.pos.is_empty() && !a.pos.contains(&r.name) {
                     continue;
                 }
-                if let Err(e) = sync::sync_repo(r, &cfg.repos.main) {
+                // like emerge --sync: auto-sync = no repos only sync when named
+                if a.pos.is_empty() && r.settings.get("auto-sync").map(|v| matches!(v.to_ascii_lowercase().as_str(), "no" | "false")).unwrap_or(false) {
+                    continue;
+                }
+                if let Err(e) = sync::sync_repo(r, &main) {
                     error(&e);
                     failed = true;
                 }
