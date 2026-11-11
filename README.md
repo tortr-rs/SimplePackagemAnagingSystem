@@ -31,6 +31,8 @@ hoard info <pkg>           versions, masks, keywords, USE
 hoard list | files | owns  query installed packages
 hoard env-update           regenerate /etc/profile.env, csh.env, ld.so.conf
 hoard verify [repo]        check a tree's signed Manifests, or a git repo's commit signature
+hoard manifest <pkg|dir>   write the DIST lines of an overlay package's Manifest
+hoard self-update          replace a hand-installed hoard with the newest release (--check)
 ```
 
 Package names without a category work (`hoard install tree` asks if it is ambiguous).
@@ -93,6 +95,30 @@ Package names without a category work (`hoard install tree` asks if it is ambigu
 `@sets` other than `@world`/`@system`/`@selected`/`@preserved-rebuild`, signing your own binary
 packages, `--keep-going` after a failed build in parallel mode, and signature checks for git
 repositories whose mirrors don't sign commits (such as ::guru from gentoo-mirror).
+
+## Installing
+
+As a package, from the [spas overlay](https://github.com/tortr-rs/spas-overlay), so `hoard upgrade`
+(or `emerge -u`) keeps it current:
+
+```
+cat > /etc/portage/repos.conf/spas.conf <<'CONF'
+[spas]
+location = /var/db/repos/spas
+sync-type = git
+sync-uri = https://github.com/tortr-rs/spas-overlay.git
+CONF
+hoard sync spas          # or: emerge --sync spas
+hoard install sys-apps/spas
+```
+
+Or the prebuilt binary from the [releases](https://github.com/tortr-rs/SimplePackagemAnagingSystem/releases);
+a hoard installed that way updates itself with `sudo hoard self-update`:
+
+```
+tar xJf hoard-VERSION-x86_64-linux-gnu.tar.xz
+sudo install -m755 hoard-VERSION-x86_64-linux-gnu/hoard /usr/local/bin/hoard
+```
 
 ## Building
 

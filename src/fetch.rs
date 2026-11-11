@@ -220,3 +220,97 @@ pub fn fetch(cfg: &Config, e: &Ebuild, use_: &UseInfo, files: &[Distfile]) -> Re
     }
     Ok(())
 }
+
+/// Where `hoard manifest` keeps downloads: DISTDIR if we may write there,
+/// else ~/.cache/hoard/distfiles.
+fn manifest_distdir(cfg: &Config) -> PathBuf {
+    let d = distdir(cfg);
+    let probe = d.join(format!(".hoard-probe-{}", std::process::id()));
+    if std::fs::create_dir_all(&d).is_ok() && std::fs::write(&probe, "").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        return d;
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home).join(".cache/hoard/distfiles")
+}
+
+/// `hoard manifest`: write the DIST entries of a package directory's Manifest,
+/// for every file any of its ebuilds can download (all USE conditionals).
+/// Entries already in the Manifest are kept; new files are downloaded and hashed.
+pub fn write_manifest(cfg: &Config, ebuilds: &[std::rc::Rc<Ebuild>]) -> Result<(), String> {
+    let pkgdir = ebuilds.first().and_then(|e| e.path.parent()).ok_or("no ebuilds")?.to_path_buf();
+    let old = manifest(&pkgdir);
+    let tpm = cfg.repos.third_party_mirrors();
+    let gentoo: Vec<String> = cfg.var("GENTOO_MIRRORS").split_whitespace().map(|s| s.trim_end_matches('/').to_string()).collect();
+    let mut want: Vec<(String, Vec<String>)> = Vec::new();
+    for e in ebuilds {
+        let nodes = depspec::parse(e.meta.get("SRC_URI")).map_err(|err| format!("{}: SRC_URI: {err}", e.cpv()))?;
+        for (uri, name) in depspec::src_uri_files(&nodes) {
+            let mut uris = Vec::new();
+            if let Some(rest) = uri.strip_prefix("mirror://") {
+                let (mname, path) = rest.split_once('/').unwrap_or((rest, ""));
+                if mname == "gentoo" {
+                    uris.extend(gentoo.iter().map(|g| format!("{g}/distfiles/{path}")));
+                } else if let Some(bases) = tpm.get(mname) {
+                    uris.extend(bases.iter().map(|b| format!("{}/{}", b.trim_end_matches('/'), path)));
+                } else {
+                    return Err(format!("{}: unknown mirror '{mname}'", e.cpv()));
+                }
+            } else if uri.contains("://") {
+                uris.push(uri.clone());
+            }
+            match want.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, u)) => u.extend(uris),
+                None => want.push((name, uris)),
+            }
+        }
+    }
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    let dir = manifest_distdir(cfg);
+    std::fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let mut lines = Vec::new();
+    for (name, uris) in &want {
+        if let Some((size, h)) = old.get(name) {
+            if let (Some(b2), Some(sha)) = (h.get("BLAKE2B"), h.get("SHA512")) {
+                lines.push(format!("DIST {name} {size} BLAKE2B {b2} SHA512 {sha}"));
+                continue;
+            }
+        }
+        let path = dir.join(name);
+        if !path.is_file() {
+            let tmp = dir.join(format!("{name}.__download__"));
+            info(&format!("Downloading {name}"));
+            let mut ok = false;
+            for u in uris {
+                match download(u, &tmp, name) {
+                    Ok(()) => {
+                        std::fs::rename(&tmp, &path).map_err(|err| err.to_string())?;
+                        ok = true;
+                        break;
+                    }
+                    Err(err) => warn(&format!("{u}: {err}")),
+                }
+            }
+            let _ = std::fs::remove_file(&tmp);
+            if !ok {
+                return Err(format!("could not fetch {name} from any location"));
+            }
+        }
+        let (size, b2, sha) = manifest_hashes(&path).map_err(|err| format!("{name}: {err}"))?;
+        lines.push(format!("DIST {name} {size} BLAKE2B {b2} SHA512 {sha}"));
+    }
+    // keep whatever else a thick Manifest has (EBUILD/AUX/MISC lines)
+    let text = std::fs::read_to_string(pkgdir.join("Manifest")).unwrap_or_default();
+    lines.extend(text.lines().filter(|l| !l.starts_with("DIST ") && !l.trim().is_empty()).map(String::from));
+    let out = pkgdir.join("Manifest");
+    let tmp = pkgdir.join(".Manifest.hoard");
+    std::fs::write(&tmp, if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" }).map_err(|err| format!("{}: {err}", tmp.display()))?;
+    // as root in someone's checkout: keep the file theirs
+    if let Ok(md) = std::fs::metadata(&pkgdir) {
+        use std::os::unix::fs::MetadataExt;
+        let _ = std::os::unix::fs::chown(&tmp, Some(md.uid()), Some(md.gid()));
+    }
+    std::fs::rename(&tmp, &out).map_err(|err| err.to_string())?;
+    info(&format!("Wrote {} ({} distfile{})", out.display(), want.len(), if want.len() == 1 { "" } else { "s" }));
+    Ok(())
+}

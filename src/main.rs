@@ -15,6 +15,7 @@ mod fetch;
 mod merge;
 mod preserve;
 mod repo;
+mod selfupdate;
 mod resolve;
 mod shellvars;
 mod sync;
@@ -72,6 +73,9 @@ commands:
   owns <path...>          which package installed a file
   env-update              regenerate /etc/profile.env and ld.so.conf
   verify [repo]           check a repository against its signed Manifests
+  manifest <pkg|dir>      write the DIST lines of an overlay package's Manifest
+  self-update             replace this hoard with the newest GitHub release
+                          (--check: only report; packaged hoard: use upgrade)
 
 Configuration is the same as Portage's: /etc/portage/make.conf, package.use,
 package.accept_keywords, package.mask, repos.conf, the selected profile.
@@ -376,6 +380,38 @@ fn run(cmd: &str, a: &Args, root: &Path) -> Result<i32, String> {
                 }
             }
             Ok(code)
+        }
+        "self-update" => selfupdate::run(a.flags.contains("check"), a.flags.contains("yes")),
+        "manifest" => {
+            let cfg = Config::load(root)?;
+            if a.pos.is_empty() {
+                return Err("usage: hoard manifest <category/package | package directory | ebuild>".into());
+            }
+            for t in &a.pos {
+                let p = PathBuf::from(t);
+                let ebuilds: Vec<_> = if p.exists() {
+                    let p = p.canonicalize().map_err(|e| format!("{t}: {e}"))?;
+                    let dir = if p.is_file() { p.parent().unwrap().to_path_buf() } else { p };
+                    let pn = dir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    let cat = dir.parent().and_then(|d| d.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    let in_repo = cfg.repos.list.iter().any(|r| r.location.canonicalize().map(|l| dir.starts_with(l)).unwrap_or(false));
+                    if !in_repo {
+                        return Err(format!("{} is not inside a repository from repos.conf", dir.display()));
+                    }
+                    cfg.repos.ebuilds(&cat, &pn).iter().filter(|e| e.path.parent() == Some(dir.as_path())).cloned().collect()
+                } else {
+                    let (cat, pn) = t.split_once('/').ok_or(format!("{t}: give category/package or a path"))?;
+                    let all = cfg.repos.ebuilds(cat, pn);
+                    let Some(first) = all.first() else { return Err(format!("{t}: no such package")) };
+                    let dir = first.path.parent().unwrap().to_path_buf();
+                    all.iter().filter(|e| e.path.parent() == Some(dir.as_path())).cloned().collect()
+                };
+                if ebuilds.is_empty() {
+                    return Err(format!("{t}: no ebuilds found"));
+                }
+                fetch::write_manifest(&cfg, &ebuilds)?;
+            }
+            Ok(0)
         }
         "env-update" => {
             need_root()?;
