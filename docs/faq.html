@@ -1,0 +1,77 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SPAS (SimplePackagemAnagingSystem): hoard, a native package manager for Gentoo written in Rust.">
+<title>SPAS: FAQ</title>
+<link rel="stylesheet" type="text/css" href="style.css">
+</head>
+<body>
+<div id="page">
+
+<div id="top">
+<h1><a href="index.html">SPAS</a></h1>
+<div class="sub">SimplePackagemAnagingSystem &mdash; a native package manager for Gentoo</div>
+</div>
+
+<div id="nav">
+<a href="index.html">Home</a> |
+<a href="features.html">Features</a> |
+<a href="download.html">Download</a> |
+<a href="install.html">Installing</a> |
+<a href="manual.html">Manual</a> |
+<b>FAQ</b> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem">Source</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/issues">Bugs</a>
+</div>
+
+<h3>Why?</h3>
+<p>To have a Gentoo package manager that is a single native binary, with no Python
+and no Portage underneath, while staying compatible with everything Portage writes.</p>
+
+<h3>Is the name spelled correctly?</h3>
+<p>Yes: <i>SimplePackagemAnagingSystem</i>, abbreviated SPAS.</p>
+
+<h3>Can I use it next to emerge?</h3>
+<p>Yes. Both read <tt>/etc/portage</tt> and write <tt>/var/db/pkg</tt> and the world file in the
+same format, so packages installed by one are seen by the other. Binary packages, the
+preserved-libs registry and autounmask changes are shared too.</p>
+
+<h3>How do I know it does the right thing?</h3>
+<p>Run <tt>hoard install -p ...</tt> and <tt>emerge -p ...</tt> side by side. During development,
+hoard's <tt>@world</tt> update plan, depclean list, <tt>@preserved-rebuild</tt> set, ELF metadata and
+Manifests were compared with Portage's on a real system and matched.</p>
+
+<h3>Is it ready?</h3>
+<p>It is young (0.x). It builds and installs real packages, but keep Portage installed as a fallback
+and read the <a href="features.html#not">list of what is not implemented</a>.</p>
+
+<h3>Which EAPIs?</h3>
+<p>7, 8 and 9.</p>
+
+<h3>Does it verify what it downloads?</h3>
+<p>Yes. Repository trees are checked against Gentoo's OpenPGP-signed Manifests, distfiles against
+their BLAKE2B and SHA512 sums, binary packages against their signed Manifests, and git commits
+against the configured key.</p>
+
+<h3>What is the license?</h3>
+<p>The 2-clause BSD license.</p>
+
+<h3>Other distributions? BSD ports?</h3>
+<p>Not now. SPAS is about Gentoo.</p>
+
+<h3>I found a bug.</h3>
+<p>Report it at <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/issues">https://github.com/tortr-rs/SimplePackagemAnagingSystem/issues</a>, ideally with
+<tt>hoard install -p</tt> output and what emerge does instead.</p>
+
+<hr>
+<div id="foot">
+SPAS is distributed under the <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/blob/master/LICENSE">2-clause BSD license</a>.
+Copyright &copy; 2026 torter.<br>
+$Date: 2026-11-11 $
+</div>
+
+</div>
+</body>
+</html>

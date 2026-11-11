@@ -1,0 +1,103 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SPAS (SimplePackagemAnagingSystem): hoard, a native package manager for Gentoo written in Rust.">
+<title>SPAS: Features</title>
+<link rel="stylesheet" type="text/css" href="style.css">
+</head>
+<body>
+<div id="page">
+
+<div id="top">
+<h1><a href="index.html">SPAS</a></h1>
+<div class="sub">SimplePackagemAnagingSystem &mdash; a native package manager for Gentoo</div>
+</div>
+
+<div id="nav">
+<a href="index.html">Home</a> |
+<b>Features</b> |
+<a href="download.html">Download</a> |
+<a href="install.html">Installing</a> |
+<a href="manual.html">Manual</a> |
+<a href="faq.html">FAQ</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem">Source</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/issues">Bugs</a>
+</div>
+
+<p>Everything below is implemented natively in hoard. Where Portage has an equivalent, hoard
+reads and writes the same files.</p>
+
+<h2>Shares Portage's files</h2>
+<table class="grid" summary="files">
+<tr><th>what</th><th>where</th></tr>
+<tr><td>configuration</td><td><tt>/etc/portage/make.conf</tt>, <tt>package.use</tt>, <tt>package.accept_keywords</tt>,
+<tt>package.mask</tt>, <tt>package.unmask</tt>, <tt>package.license</tt>, <tt>package.env</tt> + <tt>env/</tt>,
+<tt>bashrc</tt>, <tt>patches/</tt>, <tt>profile/</tt>, <tt>repos.conf</tt>, <tt>make.profile</tt></td></tr>
+<tr><td>installed packages</td><td><tt>/var/db/pkg</tt> (same layout, <tt>environment.bz2</tt>, <tt>CONTENTS</tt>, <tt>COUNTER</tt>)</td></tr>
+<tr><td>world file</td><td><tt>/var/lib/portage/world</tt></td></tr>
+<tr><td>distfiles</td><td><tt>DISTDIR</tt> (default <tt>/var/cache/distfiles</tt>)</td></tr>
+<tr><td>binary packages</td><td>GLEP 78 <tt>.gpkg.tar</tt> in <tt>PKGDIR</tt>, with a Portage-format <tt>Packages</tt> index</td></tr>
+<tr><td>preserved libraries</td><td><tt>/var/lib/portage/preserved_libs_registry</tt></td></tr>
+</table>
+
+<h2>Dependency resolution</h2>
+<ul>
+<li>Versions and atoms per PMS: every operator, <tt>=*</tt>, slots and sub-slots, <tt>:=</tt> and <tt>:*</tt>,
+repository constraints, USE dependencies with defaults, blockers.</li>
+<li><tt>||</tt> groups with backtracking (preferring what is installed), <tt>REQUIRED_USE</tt>,
+slot conflicts, <tt>--update</tt>/<tt>--deep</tt>/<tt>--newuse</tt>, dynamic dependencies of installed
+packages, automatic rebuilds after sub-slot changes, weak and strong blockers.</li>
+<li>Profile stack with <tt>parent</tt> inheritance, incremental variables, <tt>USE_EXPAND</tt>,
+<tt>use.force</tt>/<tt>use.mask</tt> (and the stable variants), license groups, keywords.</li>
+<li>When nothing fits, hoard works out the cheapest configuration change (a USE flag, a
+<tt>~arch</tt> keyword or a license; never a <tt>package.mask</tt> override), shows it and writes it to
+<tt>zz-hoard-autounmask</tt> once you confirm.</li>
+</ul>
+
+<h2>Building and merging</h2>
+<ul>
+<li>Its own ebuild environment: <tt>inherit</tt>, <tt>EXPORT_FUNCTIONS</tt>, every PMS helper for EAPI 7, 8 and 9,
+default phases, <tt>nonfatal</tt>, saved environments between phases.</li>
+<li>Builds run as the <tt>portage</tt> user, in a private network namespace, inside <tt>sys-apps/sandbox</tt> when installed.</li>
+<li>Parallel builds with <tt>-jN</tt>: independent packages build at once, merges stay in dependency order.</li>
+<li>Collision protection, <tt>CONFIG_PROTECT</tt> with <tt>._cfg</tt> files, atomic replacement of every file,
+<tt>pkg_*</tt> phases also for packages Portage installed.</li>
+<li><b>preserve-libs</b>: a library an upgrade would delete is kept while installed programs still link to it;
+<tt>hoard install @preserved-rebuild</tt> rebuilds them. A built-in ELF reader writes <tt>NEEDED.ELF.2</tt>,
+<tt>PROVIDES</tt> and <tt>REQUIRES</tt> exactly like Portage does.</li>
+</ul>
+
+<h2>Binary packages</h2>
+<ul>
+<li>Prebuilt packages straight from the official Gentoo binhost (<tt>-g</tt> or <tt>FEATURES=getbinpkg</tt>).
+A binary is used only when version, slot, IUSE and every USE flag match exactly; otherwise hoard builds the ebuild.</li>
+<li>Every binary package's Manifest is verified with the Gentoo release key before anything is unpacked.</li>
+<li>Your own builds can be saved as binary packages (<tt>-b</tt> or <tt>FEATURES=buildpkg</tt>) and
+reinstalled in a second (<tt>-k</tt>). Portage reads them too.</li>
+</ul>
+
+<h2>Repositories</h2>
+<ul>
+<li>rsync trees are checked against their OpenPGP-signed Manifests, every file.</li>
+<li>git repositories get their newest commit's signature checked (on by default for ::gentoo); a bad one is rolled back.</li>
+<li><tt>hoard sync</tt> clones overlays that were never fetched; <tt>auto-sync = no</tt> and <tt>sync-depth</tt> are honoured.</li>
+<li>Metadata from the repositories' <tt>md5-cache</tt>, regenerated for stale entries.</li>
+</ul>
+
+<h2 id="not">Not implemented (yet)</h2>
+<p>Package sets other than <tt>@world</tt>, <tt>@system</tt>, <tt>@selected</tt> and <tt>@preserved-rebuild</tt>;
+signing your own binary packages; <tt>--keep-going</tt> after a failed build in parallel mode;
+signature checks for git repositories whose mirrors don't sign commits (such as ::guru).</p>
+
+<hr>
+<div id="foot">
+SPAS is distributed under the <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/blob/master/LICENSE">2-clause BSD license</a>.
+Copyright &copy; 2026 torter.<br>
+$Date: 2026-11-11 $
+</div>
+
+</div>
+</body>
+</html>

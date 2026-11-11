@@ -1,0 +1,81 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SPAS (SimplePackagemAnagingSystem): hoard, a native package manager for Gentoo written in Rust.">
+<title>SPAS: Installing</title>
+<link rel="stylesheet" type="text/css" href="style.css">
+</head>
+<body>
+<div id="page">
+
+<div id="top">
+<h1><a href="index.html">SPAS</a></h1>
+<div class="sub">SimplePackagemAnagingSystem &mdash; a native package manager for Gentoo</div>
+</div>
+
+<div id="nav">
+<a href="index.html">Home</a> |
+<a href="features.html">Features</a> |
+<a href="download.html">Download</a> |
+<b>Installing</b> |
+<a href="manual.html">Manual</a> |
+<a href="faq.html">FAQ</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem">Source</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/issues">Bugs</a>
+</div>
+
+<h2>1. As a Gentoo package (recommended)</h2>
+<p>hoard lives in its own small overlay as <tt>sys-apps/spas</tt>. Installed this way, it is
+updated like any other package, by hoard itself or by emerge.</p>
+<pre># cat &gt; /etc/portage/repos.conf/spas.conf &lt;&lt;'EOF'
+[spas]
+location = /var/db/repos/spas
+sync-type = git
+sync-uri = https://github.com/tortr-rs/spas-overlay.git
+EOF
+# emerge --sync spas            # or, with hoard already around: hoard sync spas
+# emerge sys-apps/spas          #                              hoard install sys-apps/spas</pre>
+<p>From then on, <tt>hoard sync &amp;&amp; hoard upgrade</tt> brings in new versions.
+The package builds from source with <tt>cargo</tt> and installs <tt>/usr/bin/hoard</tt>.</p>
+
+<p><b>Note:</b> if you installed a binary into <tt>/usr/local/bin</tt> before, remove it;
+it comes first in <tt>PATH</tt> and would hide the packaged one.</p>
+
+<h2>2. The prebuilt binary</h2>
+<pre>$ tar xJf hoard-0.3.0-x86_64-linux-gnu.tar.xz
+$ sudo install -m755 hoard-0.3.0-x86_64-linux-gnu/hoard /usr/local/bin/hoard</pre>
+<p>A binary installed this way updates itself:</p>
+<pre>$ hoard self-update --check     # is there something newer?
+$ sudo hoard self-update</pre>
+<p><tt>self-update</tt> checks the download against the release's <tt>SHA256SUMS</tt> and runs the new
+binary once before swapping it in. A hoard installed as a package refuses and tells you to use
+<tt>hoard upgrade</tt> instead.</p>
+
+<h2>3. From source</h2>
+<pre>$ git clone https://github.com/tortr-rs/SimplePackagemAnagingSystem.git
+$ cd SimplePackagemAnagingSystem
+$ cargo build --release
+$ sudo install -m755 target/release/hoard /usr/local/bin/hoard</pre>
+<p>Needs Rust 1.85 or newer (edition 2024).</p>
+
+<h2>Requirements</h2>
+<ul>
+<li>Gentoo (or anything with the Gentoo repository and a selected profile)</li>
+<li><tt>bash</tt> (ebuilds are bash), <tt>git</tt> and/or <tt>rsync</tt> for syncing, <tt>gpg</tt> for signature checks</li>
+<li>Optional: <tt>sys-apps/sandbox</tt>, used for builds when installed</li>
+</ul>
+<p>Nothing from Portage is needed. Configuration stays where it was:
+<tt>/etc/portage/make.conf</tt> and friends.</p>
+
+<hr>
+<div id="foot">
+SPAS is distributed under the <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/blob/master/LICENSE">2-clause BSD license</a>.
+Copyright &copy; 2026 torter.<br>
+$Date: 2026-11-11 $
+</div>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,126 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SPAS (SimplePackagemAnagingSystem): hoard, a native package manager for Gentoo written in Rust.">
+<title>SPAS: hoard(8)</title>
+<link rel="stylesheet" type="text/css" href="style.css">
+</head>
+<body>
+<div id="page">
+
+<div id="top">
+<h1><a href="index.html">SPAS</a></h1>
+<div class="sub">SimplePackagemAnagingSystem &mdash; a native package manager for Gentoo</div>
+</div>
+
+<div id="nav">
+<a href="index.html">Home</a> |
+<a href="features.html">Features</a> |
+<a href="download.html">Download</a> |
+<a href="install.html">Installing</a> |
+<b>Manual</b> |
+<a href="faq.html">FAQ</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem">Source</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/issues">Bugs</a>
+</div>
+
+<div class="man">
+<table class="hdr" summary="man header"><tr><td>HOARD(8)</td><td style="text-align:center">System Manager's Manual</td><td style="text-align:right">HOARD(8)</td></tr></table>
+
+<h2>NAME</h2>
+<div class="ind"><b>hoard</b> &mdash; SimplePackagemAnagingSystem (SPAS), a package manager for Gentoo</div>
+
+<h2>SYNOPSIS</h2>
+<div class="ind"><b>hoard</b> [<b>--root</b> <i>dir</i>] <i>command</i> [<i>options</i>] [<i>arguments</i>]</div>
+
+<h2>DESCRIPTION</h2>
+<div class="ind"><p><b>hoard</b> installs, updates and removes packages from Gentoo ebuild repositories. It
+reads the same configuration and writes the same package database as Portage, so either can
+manage the system. Package names without a category are accepted; <b>hoard</b> asks when one is ambiguous.</p></div>
+
+<h2>COMMANDS</h2>
+<dl>
+<dt>install, i pkg ...</dt><dd>Build and install packages and their dependencies.</dd>
+<dt>upgrade, up</dt><dd>Update the whole system (<b>install -uDN @world</b>).</dd>
+<dt>remove, rm pkg ...</dt><dd>Uninstall packages (<b>-p</b>, <b>-y</b>, <b>--force</b>).</dd>
+<dt>autoremove</dt><dd>Uninstall packages nothing needs any more (<b>-p</b>, <b>-y</b>).</dd>
+<dt>sync [repo ...]</dt><dd>Update the repositories. rsync trees are verified against their signed Manifests; git repositories get their commit signature checked where configured; overlays that were never fetched are cloned.</dd>
+<dt>search, s regex</dt><dd>Search package names (<b>-d</b>: descriptions too).</dd>
+<dt>info pkg</dt><dd>Versions, keywords, masks and USE flags of a package.</dd>
+<dt>list [regex]</dt><dd>Installed packages.</dd>
+<dt>files pkg</dt><dd>Files installed by a package.</dd>
+<dt>owns path ...</dt><dd>Which package installed a file.</dd>
+<dt>env-update</dt><dd>Regenerate <i>/etc/profile.env</i> and <i>ld.so.conf</i>.</dd>
+<dt>verify [repo]</dt><dd>Check a repository against its signed Manifests, or a git repository's commit signature.</dd>
+<dt>manifest pkg|dir</dt><dd>Write the DIST lines of an overlay package's Manifest, downloading new files.</dd>
+<dt>self-update</dt><dd>Replace this hoard with the newest release (<b>--check</b>: only report). Refuses when hoard was installed as a package.</dd>
+</dl>
+
+<h2>INSTALL OPTIONS</h2>
+<dl>
+<dt>-p, --pretend</dt><dd>Only show what would be done.</dd>
+<dt>-y, --yes</dt><dd>Don't ask for confirmation.</dd>
+<dt>-1, --oneshot</dt><dd>Don't add the packages to the world file.</dd>
+<dt>-u, --update</dt><dd>Only update when a newer version is available.</dd>
+<dt>-D, --deep</dt><dd>Consider the whole dependency tree.</dd>
+<dt>-N, --newuse</dt><dd>Rebuild packages whose USE flags changed.</dd>
+<dt>-n, --noreplace</dt><dd>Skip packages that are already installed.</dd>
+<dt>-f, --fetchonly</dt><dd>Download the sources (or binary packages) only.</dd>
+<dt>-g, --getbinpkg</dt><dd>Use prebuilt packages from the Gentoo binhost (default when FEATURES contains getbinpkg).</dd>
+<dt>-k, --usepkg</dt><dd>Use packages built earlier (PKGDIR), no downloads.</dd>
+<dt>-b, --buildpkg</dt><dd>Also save each package built from source in PKGDIR (default when FEATURES contains buildpkg).</dd>
+<dt>-S, --source</dt><dd>Build everything from source.</dd>
+<dt>--nodeps</dt><dd>Ignore dependencies.</dd>
+<dt>--autounmask=n</dt><dd>Don't work out package.use / keyword / license changes.</dd>
+<dt>--autounmask-write</dt><dd>Write those changes without asking (needed with <b>-y</b>).</dd>
+<dt>--with-bdeps=y|n</dt><dd>Also update/install build dependencies of installed packages (default: from EMERGE_DEFAULT_OPTS, else n).</dd>
+<dt>-q, --quiet</dt><dd>Hide build output (it is still logged).</dd>
+<dt>-jN, --jobs=N</dt><dd>Build up to N packages at once (default: from EMERGE_DEFAULT_OPTS, else 1).</dd>
+</dl>
+
+<h2>SETS</h2>
+<div class="ind"><b>@world</b>, <b>@system</b>, <b>@selected</b>, <b>@preserved-rebuild</b>.</div>
+
+<h2>ENVIRONMENT</h2>
+<dl>
+<dt>PORTAGE_CONFIGROOT</dt><dd>Read configuration from <i>$PORTAGE_CONFIGROOT/etc/portage</i> instead of <i>/etc/portage</i>.</dd>
+<dt>PORTAGE_BINHOST</dt><dd>Binary package host to use instead of the official Gentoo one.</dd>
+<dt>NO_COLOR</dt><dd>Disable colored output.</dd>
+</dl>
+
+<h2>FILES</h2>
+<dl>
+<dt>/etc/portage/</dt><dd>make.conf, package.*, repos.conf, make.profile: the same configuration Portage uses.</dd>
+<dt>/var/db/pkg/</dt><dd>Installed package database.</dd>
+<dt>/var/lib/portage/world</dt><dd>Packages you asked for.</dd>
+<dt>/var/lib/portage/preserved_libs_registry</dt><dd>Libraries kept for programs that still need them.</dd>
+<dt>/var/cache/distfiles/</dt><dd>Downloaded sources (DISTDIR).</dd>
+<dt>/var/cache/binpkgs/</dt><dd>Your own binary packages (PKGDIR).</dd>
+<dt>/var/cache/hoard/</dt><dd>Metadata cache, binhost index and downloaded binary packages.</dd>
+</dl>
+
+<h2>EXAMPLES</h2>
+<pre>hoard sync &amp;&amp; hoard upgrade          # the usual
+hoard install -p app-editors/vim     # what would it do?
+hoard install -g -j4 www-client/firefox
+hoard owns /usr/bin/jq</pre>
+
+<h2>SEE ALSO</h2>
+<div class="ind">emerge(1), make.conf(5), portage(5), ebuild(5)</div>
+
+<h2>AUTHORS</h2>
+<div class="ind">torter. Source and bug reports at <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem">https://github.com/tortr-rs/SimplePackagemAnagingSystem</a>.</div>
+</div>
+
+<hr>
+<div id="foot">
+SPAS is distributed under the <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/blob/master/LICENSE">2-clause BSD license</a>.
+Copyright &copy; 2026 torter.<br>
+$Date: 2026-11-11 $
+</div>
+
+</div>
+</body>
+</html>

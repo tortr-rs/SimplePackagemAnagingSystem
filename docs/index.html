@@ -1,0 +1,88 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+<html lang="en">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SPAS (SimplePackagemAnagingSystem): hoard, a native package manager for Gentoo written in Rust.">
+<title>SPAS: SimplePackagemAnagingSystem</title>
+<link rel="stylesheet" type="text/css" href="style.css">
+</head>
+<body>
+<div id="page">
+
+<div id="top">
+<h1><a href="index.html">SPAS</a></h1>
+<div class="sub">SimplePackagemAnagingSystem &mdash; a native package manager for Gentoo</div>
+</div>
+
+<div id="nav">
+<b>Home</b> |
+<a href="features.html">Features</a> |
+<a href="download.html">Download</a> |
+<a href="install.html">Installing</a> |
+<a href="manual.html">Manual</a> |
+<a href="faq.html">FAQ</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem">Source</a> |
+<a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/issues">Bugs</a>
+</div>
+
+<h2>About</h2>
+
+<p><b>SPAS</b> (<i>SimplePackagemAnagingSystem</i>) is a package manager
+for <a href="https://www.gentoo.org/">Gentoo</a>. Its command is <tt>hoard</tt>.</p>
+
+<p>It is <b>not</b> a front end for Portage. hoard reads the Gentoo repositories itself,
+resolves dependencies, runs ebuilds in its own EAPI 7/8/9 bash environment, merges the result
+and records it, all without Python and without any part of Portage. It is a single binary
+written in Rust.</p>
+
+<p>hoard keeps Portage's on-disk formats (<tt>/etc/portage</tt>, <tt>/var/db/pkg</tt>,
+the world file, distfiles, binary packages), so you can switch back and forth or use both on
+the same machine.</p>
+
+<h2>Example</h2>
+<pre># hoard install -p app-misc/jq
+&gt;&gt;&gt; Calculating dependencies...
+
+[binary N    ] dev-libs/oniguruma-6.9.10::gentoo USE="-crnl-as-line-terminator -static-libs" ABI_X86="-32 (64) (-x32)" 270.0 KiB
+[ebuild N    ] app-misc/jq-1.8.2::gentoo USE="oniguruma -static-libs (-test)"
+
+Total: 2 packages, size of downloads: 270.0 KiB</pre>
+
+<p>The first package comes prebuilt from the official Gentoo binhost, chosen because its USE flags
+match; the second is built from source. See <a href="features.html">Features</a>.</p>
+
+<h2>News</h2>
+<dl class="news">
+<dt><b>2026-11-11</b> &mdash; hoard 0.3.0 released</dt>
+<dd>hoard is now a Gentoo package: add the <a href="https://github.com/tortr-rs/spas-overlay">spas overlay</a> and
+<tt>hoard install sys-apps/spas</tt>, after which <tt>hoard upgrade</tt> keeps it current.
+Hand-installed binaries get <tt>hoard self-update</tt>. New <tt>hoard manifest</tt> writes overlay
+Manifests (identical to <tt>ebuild ... manifest</tt>). Fixes <tt>--root=DIR</tt>, which was ignored.
+<a href="download.html">Download</a>.</dd>
+
+<dt><b>2026-11-11</b> &mdash; hoard 0.2.0 released</dt>
+<dd>preserve-libs (with <tt>@preserved-rebuild</tt>), parallel builds (<tt>-jN</tt>),
+your own binary packages (<tt>FEATURES=buildpkg</tt>), autounmask-style configuration changes,
+and OpenPGP checks of git commit signatures. <tt>hoard sync</tt> now clones overlays that
+were never fetched.</dd>
+
+<dt><b>2026-11-10</b> &mdash; hoard 0.1.1: now BSD licensed</dt>
+<dd>Same code as 0.1.0, relicensed under the 2-clause BSD license.</dd>
+
+<dt><b>2026-11-10</b> &mdash; hoard 0.1.0: first release</dt>
+<dd>Dependency resolution, ebuild execution, merging, sync with full Manifest verification and
+binary packages from the Gentoo binhost. Its <tt>@world</tt> update plan and depclean list were
+checked to be identical to Portage's on a real desktop system.</dd>
+</dl>
+
+<hr>
+<div id="foot">
+SPAS is distributed under the <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/blob/master/LICENSE">2-clause BSD license</a>.
+Copyright &copy; 2026 torter.<br>
+$Date: 2026-11-11 $
+</div>
+
+</div>
+</body>
+</html>
