@@ -15,7 +15,7 @@ a:visited { color: #551a8b; }
 a:active  { color: #ee0000; }
 
 #page {
-	max-width: 760px;
+	max-width: 1100px;
 	margin: 0 auto;
 	padding: 16px 0 24px 0;
 }
