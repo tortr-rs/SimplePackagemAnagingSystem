@@ -212,13 +212,55 @@ pub fn build(cfg: &Config, e: &Ebuild, use_: &UseInfo, opts: &BuildOpts) -> Resu
 
     let image = builddir.join("image");
     postprocess(cfg, e, use_, &image, &temp)?;
+    // what the installed files provide and need, for the VDB / binpkg / preserve-libs
+    let elfmeta = builddir.join("elfmeta");
+    std::fs::create_dir_all(&elfmeta).map_err(|err| err.to_string())?;
+    crate::elf::write(&crate::elf::analyze(&image), &elfmeta)?;
     let env_file = env_in.unwrap();
     Ok(Build { builddir, image, temp, env_file, base_env: r.env.clone(), a, bin_meta: None })
 }
 
-fn fresh_builddir(cfg: &Config, e: &Ebuild) -> Result<PathBuf, String> {
+pub fn builddir_for(cfg: &Config, e: &Ebuild) -> PathBuf {
     let tmp = cfg.var("PORTAGE_TMPDIR");
-    let builddir = PathBuf::from(if tmp.is_empty() { "/var/tmp" } else { tmp }).join("spas").join(&e.cat).join(e.pf());
+    PathBuf::from(if tmp.is_empty() { "/var/tmp" } else { tmp }).join("spas").join(&e.cat).join(e.pf())
+}
+
+impl Build {
+    /// Record what a finished build needs for merging, so another process can merge it.
+    pub fn save_state(&self) -> Result<(), String> {
+        let text = format!("{}\n{}\n", self.env_file.display(), self.a.join(" "));
+        std::fs::write(self.builddir.join(".hoard-build"), text).map_err(|e| e.to_string())
+    }
+
+    /// Pick up a build finished by another hoard process.
+    pub fn load_state(cfg: &Config, e: &Ebuild, use_: &UseInfo, binary: bool) -> Result<Build, String> {
+        let builddir = builddir_for(cfg, e);
+        let text = std::fs::read_to_string(builddir.join(".hoard-build")).map_err(|err| format!("{}: build state missing: {err}", e.cpv()))?;
+        let mut lines = text.lines();
+        let env_file = PathBuf::from(lines.next().unwrap_or(""));
+        let a: Vec<String> = lines.next().unwrap_or("").split_whitespace().map(|s| s.to_string()).collect();
+        let mut base_env = phase_env(cfg, e, use_, &builddir, &a);
+        if binary {
+            for (k, v) in base_env.iter_mut() {
+                if k == "MERGE_TYPE" {
+                    *v = "binary".into();
+                }
+            }
+        }
+        Ok(Build {
+            image: builddir.join("image"),
+            temp: builddir.join("temp"),
+            env_file,
+            base_env,
+            a,
+            bin_meta: binary.then(|| builddir.join("binmeta")),
+            builddir,
+        })
+    }
+}
+
+fn fresh_builddir(cfg: &Config, e: &Ebuild) -> Result<PathBuf, String> {
+    let builddir = builddir_for(cfg, e);
     if builddir.exists() {
         std::fs::remove_dir_all(&builddir).map_err(|err| format!("{}: {err}", builddir.display()))?;
     }
@@ -236,7 +278,7 @@ pub fn from_binary(cfg: &Config, e: &Ebuild, use_: &UseInfo, bin: &crate::binhos
     let image = builddir.join("image");
     let meta = builddir.join("binmeta");
     info(&format!("Unpacking binary package {}", crate::util::bold(&bin.file_name())));
-    crate::binhost::unpack(&gpkg, &builddir, &meta, &image, cfg.feature("binpkg-request-signature"))?;
+    crate::binhost::unpack(&gpkg, &builddir, &meta, &image, cfg.feature("binpkg-request-signature"), bin.local)?;
 
     // the environment saved when the package was built
     let env_file = temp.join("environment.binary");

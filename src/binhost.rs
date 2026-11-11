@@ -21,6 +21,8 @@ pub struct BinPkg {
     pub use_: HashSet<String>,
     pub iuse: HashSet<String>,
     pub fields: HashMap<String, String>,
+    /// built here and listed in PKGDIR/Packages (no download, may be unsigned)
+    pub local: bool,
 }
 
 impl BinPkg {
@@ -113,6 +115,36 @@ impl Binhost {
         Ok(parse_index(&text, &base))
     }
 
+    /// Packages we built ourselves, from PKGDIR/Packages.
+    pub fn load_local(cfg: &Config) -> Binhost {
+        let text = std::fs::read_to_string(pkgdir(cfg).join("Packages")).unwrap_or_default();
+        let mut b = parse_index(&text, "");
+        // only entries whose file is really there
+        let dir = pkgdir(cfg);
+        for v in b.pkgs.values_mut() {
+            v.retain(|p| dir.join(&p.path).is_file());
+        }
+        b
+    }
+
+    pub fn empty() -> Binhost {
+        Binhost { pkgs: HashMap::new() }
+    }
+
+    pub fn absorb(&mut self, other: Binhost) {
+        for (k, v) in other.pkgs {
+            self.pkgs.entry(k).or_default().extend(v);
+        }
+    }
+
+    pub fn by_path(&self, cpv: &str, path: &str) -> Option<Rc<BinPkg>> {
+        self.pkgs.get(cpv)?.iter().find(|b| b.path == path).cloned()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pkgs.values().all(|v| v.is_empty())
+    }
+
     /// A binary that is exactly this ebuild with exactly this USE configuration.
     pub fn find(&self, e: &Ebuild, u: &UseInfo) -> Option<Rc<BinPkg>> {
         let list = self.pkgs.get(&e.cpv())?;
@@ -128,7 +160,8 @@ impl Binhost {
                     && (if b.get("SLOT").is_empty() { "0" } else { b.get("SLOT") }) == slot
                     && crate::repo::SUPPORTED_EAPIS.contains(&b.get("EAPI"))
             })
-            .max_by_key(|b| b.build_id)
+            // our own builds first: no download needed
+            .max_by_key(|b| (b.local, b.build_id))
             .cloned()
     }
 }
@@ -184,6 +217,7 @@ fn parse_index(text: &str, base: &str) -> Binhost {
             build_id: f.get("BUILD_ID").and_then(|s| s.parse().ok()).unwrap_or(0),
             path,
             base: base.to_string(),
+            local: base.is_empty(),
             size: f.get("SIZE").and_then(|s| s.parse().ok()).unwrap_or(0),
             md5: f.get("MD5").cloned().unwrap_or_default(),
             sha1: f.get("SHA1").cloned().unwrap_or_default(),
@@ -203,8 +237,20 @@ pub fn pkgdir(cfg: &Config) -> PathBuf {
     PathBuf::from(if p.is_empty() { "/var/cache/binpkgs" } else { p })
 }
 
+/// Downloads from the binhost live apart from PKGDIR, so their file names can
+/// never collide with packages built here.
+fn remote_cache() -> PathBuf {
+    PathBuf::from("/var/cache/hoard/binhost-pkgs")
+}
+
+/// Where this package's file is (or will be) on disk.
+pub fn local_path(cfg: &Config, b: &BinPkg) -> PathBuf {
+    if b.local { pkgdir(cfg).join(&b.path) } else { remote_cache().join(&b.path) }
+}
+
+pub use sha1_smol_like::sha1_hex;
+
 fn check_index_hashes(p: &Path, b: &BinPkg) -> Result<(), String> {
-    use sha1_smol_like::sha1_hex;
     let data = std::fs::read(p).map_err(|e| e.to_string())?;
     if b.size != 0 && data.len() as u64 != b.size {
         return Err(format!("size {} but the index says {}", data.len(), b.size));
@@ -221,9 +267,13 @@ fn check_index_hashes(p: &Path, b: &BinPkg) -> Result<(), String> {
     Ok(())
 }
 
-/// Download the package into PKGDIR (or reuse a verified copy).
+/// Download the package (or reuse a verified copy); local packages are only checked.
 pub fn fetch(cfg: &Config, b: &BinPkg) -> Result<PathBuf, String> {
-    let dest = pkgdir(cfg).join(&b.path);
+    let dest = local_path(cfg, b);
+    if b.local {
+        check_index_hashes(&dest, b).map_err(|e| format!("{}: {e} (it changed since it was packaged)", dest.display()))?;
+        return Ok(dest);
+    }
     if dest.is_file() && check_index_hashes(&dest, b).is_ok() {
         return Ok(dest);
     }
@@ -331,7 +381,7 @@ fn unpack_tar(r: impl Read, prefix: &str, dest: &Path) -> Result<(), String> {
 }
 
 /// Verify a downloaded .gpkg.tar and unpack it: metadata into `meta`, files into `image`.
-pub fn unpack(gpkg: &Path, work: &Path, meta: &Path, image: &Path, require_sig: bool) -> Result<(), String> {
+pub fn unpack(gpkg: &Path, work: &Path, meta: &Path, image: &Path, require_sig: bool, local: bool) -> Result<(), String> {
     let parts = work.join("gpkg");
     let _ = std::fs::remove_dir_all(&parts);
     std::fs::create_dir_all(&parts).map_err(|e| e.to_string())?;
@@ -356,8 +406,12 @@ pub fn unpack(gpkg: &Path, work: &Path, meta: &Path, image: &Path, require_sig: 
     // signed Manifest -> hashes of every member
     let manifest = parts.join("Manifest");
     if manifest.exists() {
-        crate::sync::verify_signature(&manifest, Path::new(RELEASE_KEY))?;
         let text = std::fs::read_to_string(&manifest).map_err(|e| e.to_string())?;
+        if text.starts_with("-----BEGIN PGP SIGNED MESSAGE-----") {
+            crate::sync::verify_signature(&manifest, Path::new(RELEASE_KEY))?;
+        } else if require_sig && !local {
+            return Err("the binary package is not signed".into());
+        }
         let mut listed = HashSet::new();
         for l in text.lines() {
             let f: Vec<&str> = l.split_whitespace().collect();
@@ -385,7 +439,7 @@ pub fn unpack(gpkg: &Path, work: &Path, meta: &Path, image: &Path, require_sig: 
                 return Err(format!("{n} is not covered by the signed Manifest"));
             }
         }
-    } else if require_sig {
+    } else if require_sig && !local {
         return Err("the binary package is not signed".into());
     }
     let find = |prefix: &str| -> Result<String, String> {

@@ -2,14 +2,18 @@
 //! package manager for Gentoo ebuild repositories.
 
 mod atom;
+mod autounmask;
 mod binhost;
+mod binpkg;
 mod build;
 mod config;
 mod depspec;
+mod elf;
 mod ebuild_env;
 mod envupdate;
 mod fetch;
 mod merge;
+mod preserve;
 mod repo;
 mod resolve;
 mod shellvars;
@@ -45,11 +49,18 @@ commands:
       -f, --fetchonly       download the sources (or binary packages) only
       -g, --getbinpkg       use prebuilt packages from the Gentoo binhost
                             (default when FEATURES contains getbinpkg)
+      -k, --usepkg          use packages built earlier (PKGDIR), no downloads
+      -b, --buildpkg        also save each package built from source in PKGDIR
+                            (default when FEATURES contains buildpkg)
       -S, --source          build everything from source
       --nodeps              ignore dependencies
+      --autounmask=n        don't work out package.use / keyword / license changes
+      --autounmask-write    write those changes without asking (needed with -y)
       --with-bdeps=y|n      also update/install build deps of installed packages
                             (default: taken from EMERGE_DEFAULT_OPTS, else n)
       -q, --quiet           hide build output (it is still logged)
+      -jN, --jobs=N         build up to N packages at once (default: from
+                            EMERGE_DEFAULT_OPTS, else 1)
   upgrade, up             update the whole system (install -uDN @world)
   remove, rm  <pkg...>    uninstall packages            (-p, -y, --force)
   autoremove              uninstall packages nothing needs any more (-p, -y)
@@ -64,7 +75,7 @@ commands:
 
 Configuration is the same as Portage's: /etc/portage/make.conf, package.use,
 package.accept_keywords, package.mask, repos.conf, the selected profile.
-Sets: @world, @system, @selected.
+Sets: @world, @system, @selected, @preserved-rebuild.
 ";
 
 struct Args {
@@ -86,6 +97,8 @@ fn parse_args(raw: &[String]) -> Args {
             'n' => "noreplace",
             'f' => "fetchonly",
             'g' => "getbinpkg",
+            'b' => "buildpkg",
+            'k' => "usepkg",
             'S' => "source",
             'q' => "quiet",
             'v' => "verbose",
@@ -99,6 +112,8 @@ fn parse_args(raw: &[String]) -> Args {
             pos.push(a.clone());
         } else if a == "--" {
             only_pos = true;
+        } else if a.len() > 2 && a.starts_with("-j") && a[2..].chars().all(|c| c.is_ascii_digit()) {
+            flags.insert(format!("jobs={}", &a[2..]));
         } else if let Some(l) = a.strip_prefix("--") {
             flags.insert(l.to_string());
         } else if a.starts_with('-') && a.len() > 1 && !a[1..].starts_with(|c: char| c.is_ascii_digit() && a.len() > 2) {
@@ -152,6 +167,43 @@ fn main() {
     std::process::exit(code);
 }
 
+/// One parallel job: build (or unpack) a package and leave it ready for merging.
+fn build_one(args: &[String], root: &Path) -> Result<(), String> {
+    let (cpv, repo, kind, path, buildpkg) = (&args[0], &args[1], &args[2], &args[3], args[4] == "1");
+    let cfg = Config::load(root)?;
+    let at = Atom::parse(&format!("={cpv}")).map_err(|_| format!("bad cpv {cpv}"))?;
+    let ver = at.version.clone().ok_or_else(|| format!("bad cpv {cpv}"))?;
+    let e = cfg
+        .repos
+        .ebuilds(&at.cat, &at.pn)
+        .iter()
+        .find(|e| e.ver == ver && e.repo_name == *repo)
+        .cloned()
+        .ok_or_else(|| format!("{cpv}::{repo} is gone from the repository"))?;
+    let u = cfg.pkg_use(&e);
+    let vdb = Vdb::load(&cfg.vdb_path());
+    let replacing: Vec<String> = vdb.pkgs.iter().filter(|p| p.cp() == e.cp() && p.slot == e.slot()).map(|p| p.ver.to_string()).collect();
+    let bopts = build::BuildOpts { replacing, quiet: true };
+    let b = match kind.as_str() {
+        "src" => {
+            let b = build::build(&cfg, &e, &u, &bopts)?;
+            if buildpkg {
+                if let Err(err) = binpkg::create(&cfg, &e, &u, &b) {
+                    warn(&format!("could not create a binary package: {err}"));
+                }
+            }
+            b
+        }
+        "local" | "remote" => {
+            let index = if kind == "local" { binhost::Binhost::load_local(&cfg) } else { binhost::Binhost::load(&cfg, false)? };
+            let bin = index.by_path(cpv, path).ok_or_else(|| format!("binary package {path} is no longer listed"))?;
+            build::from_binary(&cfg, &e, &u, &bin, &bopts)?
+        }
+        k => return Err(format!("unknown job kind {k}")),
+    };
+    b.save_state()
+}
+
 /// Helpers called from inside ebuilds (has_version, best_version, ver_test).
 fn internal(args: &[String], root: &Path) -> i32 {
     match args.first().map(|s| s.as_str()) {
@@ -184,6 +236,18 @@ fn internal(args: &[String], root: &Path) -> i32 {
             }
             if m.is_empty() { 1 } else { 0 }
         }
+        Some("build-one") if args.len() == 6 => match build_one(&args[1..], root) {
+            Ok(()) => 0,
+            Err(e) => {
+                error(&e);
+                1
+            }
+        },
+        Some("elf-analyze") if args.len() == 2 => {
+            let a = elf::analyze(Path::new(&args[1]));
+            print!("--- NEEDED.ELF.2\n{}--- PROVIDES\n{}--- REQUIRES\n{}", a.needed_elf2, a.provides, a.requires);
+            0
+        }
         _ => 2,
     }
 }
@@ -195,8 +259,7 @@ fn need_root() -> Result<(), String> {
 fn run(cmd: &str, a: &Args, root: &Path) -> Result<i32, String> {
     match cmd {
         "install" | "i" => {
-            let cfg = Config::load(root)?;
-            cmd_install(&cfg, a, &a.pos)
+            cmd_install(Config::load(root)?, a, &a.pos)
         }
         "upgrade" | "up" => {
             let cfg = Config::load(root)?;
@@ -204,7 +267,7 @@ fn run(cmd: &str, a: &Args, root: &Path) -> Result<i32, String> {
             for f in ["update", "deep", "newuse", "oneshot"] {
                 a2.flags.insert(f.into());
             }
-            cmd_install(&cfg, &a2, &["@world".to_string()])
+            cmd_install(cfg, &a2, &["@world".to_string()])
         }
         "remove" | "rm" | "uninstall" => cmd_remove(&Config::load(root)?, a),
         "autoremove" | "depclean" => cmd_autoremove(&Config::load(root)?, a),
@@ -217,7 +280,7 @@ fn run(cmd: &str, a: &Args, root: &Path) -> Result<i32, String> {
                 if !a.pos.is_empty() && !a.pos.contains(&r.name) {
                     continue;
                 }
-                if let Err(e) = sync::sync_repo(r) {
+                if let Err(e) = sync::sync_repo(r, &cfg.repos.main) {
                     error(&e);
                     failed = true;
                 }
@@ -229,9 +292,10 @@ fn run(cmd: &str, a: &Args, root: &Path) -> Result<i32, String> {
             let name = a.pos.first().cloned().unwrap_or_else(|| cfg.repos.main.clone());
             let r = cfg.repos.by_name(&name).ok_or_else(|| format!("no repository called {name}"))?;
             if r.sync_type == "git" {
-                return Err(format!(
-                    "{name} is synced with git; Manifest signature checking applies to rsync repositories like gentoo"
-                ));
+                info(&format!("Verifying {name} (OpenPGP signature of the checked-out commit)"));
+                sync::verify_git_head(r)?;
+                info(&format!("{name}: commit signature is good"));
+                return Ok(0);
             }
             sync::verify_tree(r)?;
             Ok(0)
@@ -374,7 +438,7 @@ fn print_plan(cfg: &Config, vdb: &Vdb, plan: &Plan, verbose: bool) -> u64 {
         };
         let mut size = 0u64;
         if let Some(b) = &n.binpkg {
-            if !binhost::pkgdir(cfg).join(&b.path).exists() {
+            if !binhost::local_path(cfg, b).exists() {
                 size = b.size;
             }
         } else if let Ok(files) = fetch::distfiles(cfg, &n.e, &n.use_) {
@@ -411,7 +475,40 @@ fn print_plan(cfg: &Config, vdb: &Vdb, plan: &Plan, verbose: bool) -> u64 {
     total
 }
 
-fn cmd_install(cfg: &Config, a: &Args, targets: &[String]) -> Result<i32, String> {
+/// Resolve the targets; on failure also return the /etc/portage changes that would help.
+fn resolve_targets(
+    cfg: &Config,
+    vdb: &Vdb,
+    opts: &Opts,
+    binhost: Option<&binhost::Binhost>,
+    targets: &[String],
+) -> Result<(Plan, Vec<String>), (String, Vec<autounmask::Change>)> {
+    let mut r = resolve::Resolver::new(cfg, vdb, opts.clone());
+    if let Some(b) = binhost {
+        r.use_binhost(b);
+    }
+    let mut world_add: Vec<String> = Vec::new();
+    for t in targets {
+        let atoms = resolve::expand_target(cfg, vdb, t).map_err(|e| (e, vec![]))?;
+        for atom in atoms {
+            if let Err(e) = r.add_target(&atom) {
+                let p = r.take_proposal();
+                return Err((e, p));
+            }
+            if !t.starts_with('@') {
+                let mut w = atom.cp();
+                if let Some(s) = atom.slot.as_ref().and_then(|s| s.slot.clone()) {
+                    w.push_str(&format!(":{s}"));
+                }
+                world_add.push(w);
+            }
+        }
+    }
+    let plan = r.finish().map_err(|e| (e, vec![]))?;
+    Ok((plan, world_add))
+}
+
+fn cmd_install(mut cfg: Config, a: &Args, targets: &[String]) -> Result<i32, String> {
     if targets.is_empty() {
         return Err("nothing to install (see hoard help)".into());
     }
@@ -429,38 +526,47 @@ fn cmd_install(cfg: &Config, a: &Args, targets: &[String]) -> Result<i32, String
         nodeps: a.flags.contains("nodeps"),
         with_bdeps: a.flags.contains("with-bdeps=y")
             || (!a.flags.contains("with-bdeps=n") && cfg.var("EMERGE_DEFAULT_OPTS").split_whitespace().any(|o| o == "--with-bdeps=y")),
+        autounmask: !a.flags.contains("autounmask=n"),
     };
-    let want_bin = !a.flags.contains("source") && (a.flags.contains("getbinpkg") || cfg.feature("getbinpkg"));
-    let binhost = if want_bin {
-        match binhost::Binhost::load(cfg, false) {
-            Ok(b) => Some(b),
-            Err(e) => {
-                warn(&format!("{e}; building from source"));
-                None
-            }
+    let source_only = a.flags.contains("source");
+    let want_remote = !source_only && (a.flags.contains("getbinpkg") || cfg.feature("getbinpkg"));
+    let buildpkg = a.flags.contains("buildpkg") || cfg.feature("buildpkg");
+    // our own earlier builds are used whenever binaries are wanted at all
+    let want_local = !source_only && (want_remote || buildpkg || a.flags.contains("usepkg"));
+    let mut bins = binhost::Binhost::empty();
+    if want_local {
+        bins.absorb(binhost::Binhost::load_local(&cfg));
+    }
+    if want_remote {
+        match binhost::Binhost::load(&cfg, false) {
+            Ok(b) => bins.absorb(b),
+            Err(e) => warn(&format!("{e}; building from source")),
         }
-    } else {
-        None
-    };
+    }
+    let binhost = if bins.is_empty() { None } else { Some(bins) };
     info("Calculating dependencies...");
-    let mut r = resolve::Resolver::new(cfg, &vdb, opts);
-    if let Some(b) = &binhost {
-        r.use_binhost(b);
-    }
-    let mut world_add: Vec<String> = Vec::new();
-    for t in targets {
-        for atom in resolve::expand_target(cfg, &vdb, t)? {
-            r.add_target(&atom)?;
-            if !t.starts_with('@') {
-                let mut w = atom.cp();
-                if let Some(s) = atom.slot.as_ref().and_then(|s| s.slot.clone()) {
-                    w.push_str(&format!(":{s}"));
+    // retry with each proposed /etc/portage change applied in memory
+    let mut changes: Vec<autounmask::Change> = Vec::new();
+    let (plan, world_add) = loop {
+        match resolve_targets(&cfg, &vdb, &opts, binhost.as_ref(), targets) {
+            Ok(x) => break x,
+            Err((msg, proposal)) => {
+                let new: Vec<autounmask::Change> = proposal.into_iter().filter(|c| !changes.contains(c)).collect();
+                if new.is_empty() || changes.len() > 64 {
+                    if !changes.is_empty() {
+                        warn("even with these changes the dependencies can't be satisfied:");
+                        autounmask::show(&cfg.config_root, &changes);
+                    }
+                    return Err(msg);
                 }
-                world_add.push(w);
+                for c in &new {
+                    cfg.apply_change(c)?;
+                }
+                changes.extend(new);
             }
         }
-    }
-    let plan = r.finish()?;
+    };
+    let cfg = &cfg;
     for w in &plan.warnings {
         warn(w);
     }
@@ -479,6 +585,28 @@ fn cmd_install(cfg: &Config, a: &Args, targets: &[String]) -> Result<i32, String
         if plan.order.len() == 1 { "" } else { "s" },
         if total > 0 { format!(", size of downloads: {}", util::human_size(total)) } else { String::new() }
     );
+    if !changes.is_empty() {
+        warn("this plan needs the following changes to /etc/portage:");
+        autounmask::show(&cfg.config_root, &changes);
+        if pretend {
+            info("run without -p and hoard will offer to write them");
+            return Ok(0);
+        }
+        // -y alone never edits /etc/portage: that takes the prompt or --autounmask-write
+        let write = if a.flags.contains("autounmask-write") {
+            true
+        } else if a.flags.contains("yes") {
+            info("not writing them because of --yes; add --autounmask-write to allow that");
+            false
+        } else {
+            util::ask("Write these changes to /etc/portage?")
+        };
+        if !write {
+            info("Nothing was changed or merged.");
+            return Ok(1);
+        }
+        autounmask::write(&cfg.config_root, &changes)?;
+    }
     if pretend {
         return Ok(0);
     }
@@ -488,73 +616,35 @@ fn cmd_install(cfg: &Config, a: &Args, targets: &[String]) -> Result<i32, String
     }
     let fetchonly = a.flags.contains("fetchonly");
     let quiet = a.flags.contains("quiet");
-    let count = plan.order.len();
+    let jobs = job_count(a, cfg);
     let mut elogs: Vec<(String, PathBuf)> = Vec::new();
-    for (k, &i) in plan.order.iter().enumerate() {
-        let n = &plan.nodes[i];
-        let cpv = n.e.cpv();
-        if fetchonly {
-            info(&format!("({}/{count}) Fetching {}", k + 1, bold(&cpv)));
+    let ok = if fetchonly {
+        let count = plan.order.len();
+        for (k, &i) in plan.order.iter().enumerate() {
+            let n = &plan.nodes[i];
+            info(&format!("({}/{count}) Fetching {}", k + 1, bold(&n.e.cpv())));
             if let Some(b) = &n.binpkg {
                 binhost::fetch(cfg, b)?;
             } else {
                 let files = fetch::distfiles(cfg, &n.e, &n.use_)?;
                 fetch::fetch(cfg, &n.e, &n.use_, &files)?;
             }
-            continue;
         }
-        let how = if n.binpkg.is_some() { "Installing (binary)" } else { "Emerging" };
-        info(&format!("({}/{count}) {how} {}", k + 1, bold(&cpv)));
-        let vdb_now = Vdb::load(&cfg.vdb_path());
-        let replacing: Vec<String> = vdb_now.pkgs.iter().filter(|p| p.cp() == n.e.cp() && p.slot == n.e.slot()).map(|p| p.ver.to_string()).collect();
-        let bopts = build::BuildOpts { replacing, quiet };
-        let prepared = match &n.binpkg {
-            Some(b) => build::from_binary(cfg, &n.e, &n.use_, b, &bopts),
-            None => build::build(cfg, &n.e, &n.use_, &bopts),
-        };
-        let res = prepared
-            .and_then(|b| merge::install(cfg, &n.e, &n.use_, &b, quiet).map(|_| b));
-        let b = match res {
-            Ok(b) => b,
-            Err(e) => {
-                error(&e);
-                let log = PathBuf::from(cfg.var("PORTAGE_TMPDIR")).join("spas").join(&n.e.cat).join(n.e.pf()).join("temp/build.log");
-                if log.exists() {
-                    error(&format!("build log: {}", log.display()));
-                }
-                print_elogs(&elogs);
-                let rest: Vec<String> = plan.order[k + 1..].iter().map(|&j| plan.nodes[j].e.cpv()).collect();
-                if !rest.is_empty() {
-                    warn(&format!("not merged because of this failure: {}", rest.join(" ")));
-                }
-                return Ok(1);
-            }
-        };
-        if let Err(e) = envupdate::env_update(&cfg.root, true) {
-            warn(&format!("env-update: {e}"));
+        true
+    } else if jobs > 1 {
+        run_parallel(cfg, a, &plan, &world_add, jobs, buildpkg, root_of(cfg), &mut elogs)?
+    } else {
+        run_sequential(cfg, a, &plan, &world_add, quiet, buildpkg, &mut elogs)?
+    };
+    if !fetchonly {
+        if let Err(e) = preserve::prune(cfg) {
+            warn(&format!("preserved libraries: {e}"));
         }
-        for u in &n.uninstall_after {
-            let v = Vdb::load(&cfg.vdb_path());
-            if let Some(inst) = v.pkgs.iter().find(|p| p.cpv() == *u) {
-                if let Err(e) = merge::uninstall(cfg, inst, false) {
-                    warn(&e);
-                }
-            }
-        }
-        if !a.flags.contains("oneshot") {
-            let mine: Vec<String> = world_add.iter().filter(|w| w.split(':').next() == Some(n.e.cp().as_str())).cloned().collect();
-            add_world(cfg, &mine)?;
-        }
-        let elog = b.temp.join("spas-elog");
-        if elog.exists() {
-            let keep = b.builddir.parent().unwrap().join(format!(".{}.elog", n.e.pf()));
-            let _ = std::fs::copy(&elog, &keep);
-            elogs.push((cpv.clone(), keep));
-        }
-        if !cfg.feature("keepwork") && !cfg.feature("noclean") {
-            let _ = std::fs::remove_dir_all(&b.builddir);
-        }
-        info(&format!("{} installed", bold(&cpv)));
+        preserve::report(cfg);
+    }
+    if !ok {
+        print_elogs(&elogs);
+        return Ok(1);
     }
     print_elogs(&elogs);
     for (_, p) in &elogs {
@@ -565,6 +655,231 @@ fn cmd_install(cfg: &Config, a: &Args, targets: &[String]) -> Result<i32, String
         warn(&format!("{cfg_files} config file(s) in /etc need updating (look for ._cfg* files)"));
     }
     Ok(0)
+}
+
+fn root_of(cfg: &Config) -> &Path {
+    &cfg.root
+}
+
+/// --jobs=N / -jN, or the same in EMERGE_DEFAULT_OPTS; default 1.
+fn job_count(a: &Args, cfg: &Config) -> usize {
+    let from = |t: &str| t.strip_prefix("jobs=").or_else(|| t.strip_prefix("--jobs=")).or_else(|| t.strip_prefix("-j")).and_then(|n| n.parse::<usize>().ok());
+    if let Some(n) = a.flags.iter().find_map(|f| from(f)) {
+        return n.max(1);
+    }
+    cfg.var("EMERGE_DEFAULT_OPTS").split_whitespace().find_map(from).unwrap_or(1).max(1)
+}
+
+fn build_log(cfg: &Config, n: &resolve::PkgNode) -> PathBuf {
+    build::builddir_for(cfg, &n.e).join("temp/build.log")
+}
+
+/// Everything after a package is merged: env-update, blockers, world, elog, cleanup.
+fn after_merge(
+    cfg: &Config,
+    a: &Args,
+    n: &resolve::PkgNode,
+    b: &build::Build,
+    world_add: &[String],
+    elogs: &mut Vec<(String, PathBuf)>,
+) -> Result<(), String> {
+    if let Err(e) = envupdate::env_update(&cfg.root, true) {
+        warn(&format!("env-update: {e}"));
+    }
+    for u in &n.uninstall_after {
+        let v = Vdb::load(&cfg.vdb_path());
+        if let Some(inst) = v.pkgs.iter().find(|p| p.cpv() == *u) {
+            if let Err(e) = merge::uninstall(cfg, inst, false) {
+                warn(&e);
+            }
+        }
+    }
+    if !a.flags.contains("oneshot") {
+        let mine: Vec<String> = world_add.iter().filter(|w| w.split(':').next() == Some(n.e.cp().as_str())).cloned().collect();
+        add_world(cfg, &mine)?;
+    }
+    let elog = b.temp.join("spas-elog");
+    if elog.exists() {
+        let keep = b.builddir.parent().unwrap().join(format!(".{}.elog", n.e.pf()));
+        let _ = std::fs::copy(&elog, &keep);
+        elogs.push((n.e.cpv(), keep));
+    }
+    if !cfg.feature("keepwork") && !cfg.feature("noclean") {
+        let _ = std::fs::remove_dir_all(&b.builddir);
+    }
+    info(&format!("{} installed", bold(&n.e.cpv())));
+    Ok(())
+}
+
+fn run_sequential(
+    cfg: &Config,
+    a: &Args,
+    plan: &Plan,
+    world_add: &[String],
+    quiet: bool,
+    buildpkg: bool,
+    elogs: &mut Vec<(String, PathBuf)>,
+) -> Result<bool, String> {
+    let count = plan.order.len();
+    for (k, &i) in plan.order.iter().enumerate() {
+        let n = &plan.nodes[i];
+        let how = if n.binpkg.is_some() { "Installing (binary)" } else { "Emerging" };
+        info(&format!("({}/{count}) {how} {}", k + 1, bold(&n.e.cpv())));
+        let vdb_now = Vdb::load(&cfg.vdb_path());
+        let replacing: Vec<String> = vdb_now.pkgs.iter().filter(|p| p.cp() == n.e.cp() && p.slot == n.e.slot()).map(|p| p.ver.to_string()).collect();
+        let bopts = build::BuildOpts { replacing, quiet };
+        let prepared = match &n.binpkg {
+            Some(b) => build::from_binary(cfg, &n.e, &n.use_, b, &bopts),
+            None => build::build(cfg, &n.e, &n.use_, &bopts),
+        };
+        let res = prepared.and_then(|b| {
+            // package it before merging, like Portage (a failure here isn't fatal)
+            if buildpkg && n.binpkg.is_none() {
+                if let Err(e) = binpkg::create(cfg, &n.e, &n.use_, &b) {
+                    warn(&format!("could not create a binary package: {e}"));
+                }
+            }
+            merge::install(cfg, &n.e, &n.use_, &b, quiet).map(|_| b)
+        });
+        match res {
+            Ok(b) => after_merge(cfg, a, n, &b, world_add, elogs)?,
+            Err(e) => {
+                error(&e);
+                let log = build_log(cfg, n);
+                if log.exists() {
+                    error(&format!("build log: {}", log.display()));
+                }
+                let rest: Vec<String> = plan.order[k + 1..].iter().map(|&j| plan.nodes[j].e.cpv()).collect();
+                if !rest.is_empty() {
+                    warn(&format!("not merged because of this failure: {}", rest.join(" ")));
+                }
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Build up to `jobs` packages at once in child hoard processes; merge each one
+/// here, one at a time, as soon as it is built.
+#[allow(clippy::too_many_arguments)]
+fn run_parallel(
+    cfg: &Config,
+    a: &Args,
+    plan: &Plan,
+    world_add: &[String],
+    jobs: usize,
+    buildpkg: bool,
+    root: &Path,
+    elogs: &mut Vec<(String, PathBuf)>,
+) -> Result<bool, String> {
+    #[derive(PartialEq, Clone, Copy)]
+    enum St {
+        Pending,
+        Running,
+        Merged,
+        Failed,
+    }
+    let count = plan.order.len();
+    let pos: std::collections::HashMap<usize, usize> = plan.order.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let mut st: std::collections::HashMap<usize, St> = plan.order.iter().map(|&i| (i, St::Pending)).collect();
+    let mut running: std::collections::HashMap<i32, (usize, std::process::Child)> = std::collections::HashMap::new();
+    let mut merged = 0usize;
+    let mut stop = false;
+    let job_log = |n: &resolve::PkgNode| build::builddir_for(cfg, &n.e).with_extension("hoard-job.log");
+    info(&format!("Building with up to {jobs} parallel jobs (build output goes to each package's build.log)"));
+    loop {
+        // start whatever is ready: everything it depends on (earlier in the plan) is merged
+        if !stop {
+            for &i in &plan.order {
+                if running.len() >= jobs {
+                    break;
+                }
+                if st[&i] != St::Pending {
+                    continue;
+                }
+                let n = &plan.nodes[i];
+                let ready = n.deps.iter().all(|&(c, k)| {
+                    k == resolve::DepKind::P || pos.get(&c).map(|&pc| pc >= pos[&i] || st[&c] == St::Merged).unwrap_or(true)
+                });
+                if !ready {
+                    continue;
+                }
+                let (kind, path) = match &n.binpkg {
+                    Some(b) if b.local => ("local", b.path.clone()),
+                    Some(b) => ("remote", b.path.clone()),
+                    None => ("src", "-".to_string()),
+                };
+                let log = job_log(n);
+                if let Some(d) = log.parent() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+                let out = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
+                let child = std::process::Command::new(ebuild_env::self_exe())
+                    .arg("--root")
+                    .arg(root)
+                    .args(["__internal", "build-one", &n.e.cpv(), &n.e.repo_name, kind, &path, if buildpkg { "1" } else { "0" }])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(out.try_clone().map_err(|e| e.to_string())?)
+                    .stderr(out)
+                    .spawn()
+                    .map_err(|e| format!("starting a build job: {e}"))?;
+                let how = if n.binpkg.is_some() { "Unpacking" } else { "Building" };
+                info(&format!("({}/{count}) {how} {}", pos[&i] + 1, bold(&n.e.cpv())));
+                running.insert(child.id() as i32, (i, child));
+                st.insert(i, St::Running);
+            }
+        }
+        if running.is_empty() {
+            break;
+        }
+        let mut status = 0;
+        // SAFETY: plain waitpid on our own children
+        let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+        if pid < 0 {
+            return Err("waiting for build jobs failed".into());
+        }
+        let Some((i, _child)) = running.remove(&pid) else { continue };
+        let n = &plan.nodes[i];
+        let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+        let result = if success {
+            build::Build::load_state(cfg, &n.e, &n.use_, n.binpkg.is_some()).and_then(|b| {
+                merge::install(cfg, &n.e, &n.use_, &b, true).map(|_| b)
+            })
+        } else {
+            Err(String::new())
+        };
+        match result {
+            Ok(b) => {
+                after_merge(cfg, a, n, &b, world_add, elogs)?;
+                let _ = std::fs::remove_file(job_log(n));
+                st.insert(i, St::Merged);
+                merged += 1;
+                info(&format!("Jobs: {merged} of {count} complete, {} running", running.len()));
+            }
+            Err(e) => {
+                st.insert(i, St::Failed);
+                stop = true;
+                error(&format!("{} failed{}", n.e.cpv(), if e.is_empty() { String::new() } else { format!(": {e}") }));
+                let jl = std::fs::read_to_string(job_log(n)).unwrap_or_default();
+                for l in jl.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev() {
+                    eprintln!("    {l}");
+                }
+                let bl = build_log(cfg, n);
+                if bl.exists() {
+                    error(&format!("build log: {}", bl.display()));
+                }
+                if !running.is_empty() {
+                    info(&format!("waiting for {} running job(s) to finish...", running.len()));
+                }
+            }
+        }
+    }
+    let left: Vec<String> = plan.order.iter().filter(|i| st[*i] == St::Pending).map(|&i| plan.nodes[i].e.cpv()).collect();
+    if !left.is_empty() {
+        warn(&format!("not merged because of the failure: {}", left.join(" ")));
+    }
+    Ok(!st.values().any(|s| *s == St::Failed))
 }
 
 fn print_elogs(elogs: &[(String, PathBuf)]) {
@@ -687,7 +1002,11 @@ fn cmd_remove(cfg: &Config, a: &Args) -> Result<i32, String> {
         })
         .collect();
     vdb::write_world(&p, &w).map_err(|e| e.to_string())?;
+    if let Err(e) = preserve::prune(cfg) {
+        warn(&format!("preserved libraries: {e}"));
+    }
     envupdate::env_update(&cfg.root, true)?;
+    preserve::report(cfg);
     Ok(0)
 }
 

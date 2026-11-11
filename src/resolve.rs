@@ -1,5 +1,6 @@
 //! Dependency resolution: from target atoms to an ordered merge list.
 
+use crate::autounmask::{Change, Kind};
 use crate::binhost::{BinPkg, Binhost};
 use crate::atom::{use_reqs_satisfied, Atom, Blocker, SlotOp};
 use crate::config::{Config, UseInfo};
@@ -51,6 +52,8 @@ pub struct Opts {
     pub noreplace: bool,
     pub nodeps: bool,
     pub with_bdeps: bool,
+    /// work out /etc/portage changes when nothing satisfies a dependency
+    pub autounmask: bool,
 }
 
 #[derive(Clone)]
@@ -70,6 +73,8 @@ pub struct Resolver<'a> {
     /// while walking build deps of installed packages: skip anything not installed
     installed_only: bool,
     binhost: Option<&'a Binhost>,
+    /// changes that would let the failed dependency resolve
+    proposal: Vec<Change>,
 }
 
 pub struct Plan {
@@ -98,7 +103,73 @@ impl<'a> Resolver<'a> {
             path: vec![],
             installed_only: false,
             binhost: None,
+            proposal: vec![],
         }
+    }
+
+    /// The /etc/portage changes worked out for the last failure, if any.
+    pub fn take_proposal(&mut self) -> Vec<Change> {
+        std::mem::take(&mut self.proposal)
+    }
+
+    /// The cheapest set of changes that makes some version satisfy `a`
+    /// (USE changes before licenses before keywords, newest version on ties).
+    fn propose(&self, a: &Atom, parent_use: Option<&HashSet<String>>) -> Vec<Change> {
+        let reqs = a.use_reqs(parent_use);
+        let required_by = {
+            let mut p: Vec<String> = self.path.iter().rev().cloned().collect();
+            p.insert(0, a.to_string());
+            p.join(" <- ")
+        };
+        let mut best: Option<(u32, Vec<Change>)> = None;
+        for e in self.cfg.repos.matching(a) {
+            if !crate::repo::SUPPORTED_EAPIS.contains(&e.meta.get("EAPI")) || self.cfg.mask_reason(&e).is_some() {
+                continue;
+            }
+            let atom = format!("={}", e.cpv());
+            let mut out = Vec::new();
+            if !self.cfg.keywords_ok(&e) {
+                let testing = format!("~{}", self.cfg.arch);
+                if !e.meta.get("KEYWORDS").split_whitespace().any(|k| k == testing) {
+                    continue; // not even in testing for this arch: leave it alone
+                }
+                out.push(Change { kind: Kind::Keywords, atom: atom.clone(), tokens: vec![testing], required_by: required_by.clone() });
+            }
+            let lic = self.cfg.unaccepted_licenses(&e);
+            if !lic.is_empty() {
+                out.push(Change { kind: Kind::License, atom: atom.clone(), tokens: lic, required_by: required_by.clone() });
+            }
+            let u = self.cfg.pkg_use(&e);
+            let mut flags = Vec::new();
+            let mut impossible = false;
+            for r in &reqs {
+                let have = if u.effective.contains(&r.flag) { u.enabled.contains(&r.flag) } else { r.default.unwrap_or(!r.enabled) };
+                if have == r.enabled {
+                    continue;
+                }
+                // flags outside IUSE, or forced/masked by the profile, can't be changed in package.use
+                if !u.effective.contains(&r.flag) || u.forced.contains(&r.flag) || u.masked.contains(&r.flag) {
+                    impossible = true;
+                    break;
+                }
+                flags.push(if r.enabled { r.flag.clone() } else { format!("-{}", r.flag) });
+            }
+            if impossible {
+                continue;
+            }
+            if !flags.is_empty() {
+                // >= like Portage, so the flags stay set across upgrades
+                out.push(Change { kind: Kind::Use, atom: format!(">={}", e.cpv()), tokens: flags, required_by: required_by.clone() });
+            }
+            if out.is_empty() {
+                continue;
+            }
+            let cost: u32 = out.iter().map(|c| match c.kind { Kind::Use => 1, Kind::License => 2, Kind::Keywords => 4 }).sum();
+            if best.as_ref().map(|(b, _)| cost < *b).unwrap_or(true) {
+                best = Some((cost, out));
+            }
+        }
+        best.map(|(_, c)| c).unwrap_or_default()
     }
 
     /// Use prebuilt packages from this binhost where they match exactly.
@@ -217,6 +288,9 @@ impl<'a> Resolver<'a> {
             }
         }
         let Some((e, u)) = chosen else {
+            if self.opts.autounmask {
+                self.proposal = self.propose(a, parent_use);
+            }
             return Err(self.explain_none(a, parent_use));
         };
         let key = (e.cp(), e.slot().to_string());
@@ -657,6 +731,7 @@ pub fn expand_target(cfg: &Config, vdb: &Vdb, s: &str) -> Result<Vec<Atom>, Stri
             Ok(v)
         }
         "@system" => Ok(cfg.system.clone()),
+        "@preserved-rebuild" => Ok(crate::preserve::rebuild_targets(cfg, vdb).iter().filter_map(|a| Atom::parse(a).ok()).collect()),
         "@selected" => Ok(crate::vdb::read_world(&cfg.world_file())
             .iter()
             .filter(|l| !l.starts_with('@'))

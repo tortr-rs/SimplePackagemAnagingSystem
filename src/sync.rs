@@ -20,28 +20,148 @@ fn run(cmd: &mut Command) -> Result<(), String> {
     if st.success() { Ok(()) } else { Err(format!("{:?} failed", cmd.get_program())) }
 }
 
-pub fn sync_repo(r: &Repo) -> Result<(), String> {
-    info(&format!("Syncing {} ({})", crate::util::bold(&r.name), r.location.display()));
-    match r.sync_type.as_str() {
-        "git" => {
-            if r.location.join(".git").exists() {
-                // run as whoever owns the checkout, so file ownership stays the same
-                let uid = std::fs::metadata(&r.location).map(|m| (m.uid(), m.gid())).ok();
-                let mut c = Command::new("git");
-                c.arg("-C").arg(&r.location).args(["pull", "--ff-only"]);
-                if let Some((u, g)) = uid {
-                    if u != 0 && crate::util::is_root() {
-                        c.uid(u).gid(g);
-                    }
-                }
-                run(&mut c)
-            } else {
-                if r.sync_uri.is_empty() {
-                    return Err(format!("{}: no sync-uri", r.name));
-                }
-                run(Command::new("git").args(["clone", "--depth", "1", &r.sync_uri]).arg(&r.location))
+fn truthy(v: &str) -> bool {
+    matches!(v.to_ascii_lowercase().as_str(), "yes" | "true" | "1")
+}
+
+fn key_path(r: &Repo) -> PathBuf {
+    PathBuf::from(r.settings.get("sync-openpgp-key-path").cloned().unwrap_or_else(|| "/usr/share/openpgp-keys/gentoo-release.asc".into()))
+}
+
+/// Should commits of this git repository be signature-checked?
+/// repos.conf decides; ::gentoo defaults to yes (its mirror signs every commit).
+pub fn git_verify_wanted(r: &Repo, main_repo: &str) -> bool {
+    match r.settings.get("sync-git-verify-commit-signature") {
+        Some(v) => truthy(v),
+        None => r.name == main_repo,
+    }
+}
+
+/// Run `f` with a throwaway GnuPG home that trusts only `key`.
+fn with_keyring<T>(key: &Path, f: impl FnOnce(&Path) -> Result<T, String>) -> Result<T, String> {
+    if !key.exists() {
+        return Err(format!("signing key {} is missing (emerge sec-keys/openpgp-keys-gentoo-release)", key.display()));
+    }
+    let home = std::env::temp_dir().join(format!("spas-gpg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700));
+    let imp = Command::new("gpg")
+        .arg("--homedir")
+        .arg(&home)
+        .args(["--batch", "--no-tty", "--import"])
+        .arg(key)
+        .output()
+        .map_err(|e| format!("gpg: {e}"));
+    let res = match imp {
+        Ok(o) if o.status.success() => f(&home),
+        Ok(_) => Err("gpg could not import the signing key".into()),
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_dir_all(&home);
+    res
+}
+
+fn git(r: &Repo) -> Command {
+    let mut c = Command::new("git");
+    // the checkout may belong to another user; we only read it here
+    c.args(["-c", "safe.directory=*", "-C"]).arg(&r.location).env("PATH", crate::ebuild_env::PATH);
+    c
+}
+
+fn home_of(uid: u32) -> Option<PathBuf> {
+    // SAFETY: getpwuid returns a pointer into static storage or null
+    unsafe {
+        let pw = libc::getpwuid(uid);
+        if pw.is_null() || (*pw).pw_dir.is_null() {
+            return None;
+        }
+        let dir = std::ffi::CStr::from_ptr((*pw).pw_dir).to_string_lossy().to_string();
+        Some(PathBuf::from(dir))
+    }
+}
+
+fn git_head(r: &Repo) -> Option<String> {
+    let o = git(r).args(["rev-parse", "HEAD"]).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Check the OpenPGP signature of the checked-out commit.
+pub fn verify_git_head(r: &Repo) -> Result<(), String> {
+    let key = key_path(r);
+    with_keyring(&key, |home| {
+        let out = git(r).env("GNUPGHOME", home).args(["verify-commit", "--raw", "HEAD"]).output().map_err(|e| format!("git: {e}"))?;
+        let status = String::from_utf8_lossy(&out.stderr);
+        if out.status.success() && status.contains("[GNUPG:] VALIDSIG") {
+            return Ok(());
+        }
+        if status.contains("EXPKEYSIG") {
+            warn(&format!("the key in {} has expired; update it", key.display()));
+        }
+        if !status.contains("[GNUPG:]") {
+            return Err(format!("{}: the newest commit is not signed", r.name));
+        }
+        Err(format!("{}: the newest commit has no valid signature from {}", r.name, key.display()))
+    })
+}
+
+fn sync_git(r: &Repo, verify: bool) -> Result<(), String> {
+    if !r.location.join(".git").exists() {
+        if r.sync_uri.is_empty() {
+            return Err(format!("{}: no sync-uri", r.name));
+        }
+        run(Command::new("git").args(["clone", "--depth", "1", &r.sync_uri]).arg(&r.location))?;
+        if verify {
+            if let Err(e) = verify_git_head(r) {
+                let _ = std::fs::remove_dir_all(&r.location);
+                return Err(format!("{e}; the fresh clone was removed"));
             }
         }
+        return Ok(());
+    }
+    let before = git_head(r);
+    // run as whoever owns the checkout, so file ownership stays the same
+    let owner = std::fs::metadata(&r.location).map(|m| (m.uid(), m.gid())).ok();
+    let as_owner = |c: &mut Command| {
+        if let Some((u, g)) = owner {
+            if u != 0 && crate::util::is_root() {
+                c.uid(u).gid(g);
+                if let Some(h) = home_of(u) {
+                    c.env("HOME", h);
+                }
+            }
+        }
+    };
+    let mut c = Command::new("git");
+    c.arg("-C").arg(&r.location).args(["pull", "--ff-only"]);
+    as_owner(&mut c);
+    run(&mut c)?;
+    if !verify {
+        warn(&format!(
+            "{} is not signature-checked (set sync-git-verify-commit-signature = yes and sync-openpgp-key-path in repos.conf if its commits are signed)",
+            r.name
+        ));
+        return Ok(());
+    }
+    if let Err(e) = verify_git_head(r) {
+        if let Some(old) = before.filter(|b| Some(b) != git_head(r).as_ref()) {
+            let mut c = Command::new("git");
+            c.arg("-C").arg(&r.location).args(["reset", "-q", "--hard", &old]);
+            as_owner(&mut c);
+            let _ = run(&mut c);
+            return Err(format!("{e}; rolled back to the previous commit"));
+        }
+        return Err(e);
+    }
+    info(&format!("{}: commit signature is good", r.name));
+    Ok(())
+}
+
+pub fn sync_repo(r: &Repo, main_repo: &str) -> Result<(), String> {
+    info(&format!("Syncing {} ({})", crate::util::bold(&r.name), r.location.display()));
+    match r.sync_type.as_str() {
+        "git" => sync_git(r, git_verify_wanted(r, main_repo)),
         "rsync" => {
             if r.sync_uri.is_empty() {
                 return Err(format!("{}: no sync-uri", r.name));
@@ -95,32 +215,23 @@ pub fn verify_tree(r: &Repo) -> Result<(), String> {
 }
 
 pub fn verify_signature(manifest: &Path, key: &Path) -> Result<(), String> {
-    if !key.exists() {
-        return Err(format!("signing key {} is missing (emerge sec-keys/openpgp-keys-gentoo-release)", key.display()));
-    }
-    let home = std::env::temp_dir().join(format!("spas-gpg-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700));
-    let gpg = |args: &[&str]| {
-        Command::new("gpg").arg("--homedir").arg(&home).args(["--batch", "--no-tty", "--status-fd", "1"]).args(args).output()
-    };
-    let imp = gpg(&["--import", &key.display().to_string()]).map_err(|e| format!("gpg: {e}"))?;
-    if !imp.status.success() {
-        let _ = std::fs::remove_dir_all(&home);
-        return Err("gpg could not import the signing key".into());
-    }
-    let out = gpg(&["--verify", &manifest.display().to_string()]).map_err(|e| format!("gpg: {e}"))?;
-    let _ = std::fs::remove_dir_all(&home);
-    let status = String::from_utf8_lossy(&out.stdout);
-    if status.contains("[GNUPG:] VALIDSIG") && out.status.success() {
-        return Ok(());
-    }
-    if status.contains("EXPKEYSIG") {
-        warn("the signing key has expired; update sec-keys/openpgp-keys-gentoo-release");
-    }
-    Err(format!("bad OpenPGP signature on {}", manifest.display()))
+    with_keyring(key, |home| {
+        let out = Command::new("gpg")
+            .arg("--homedir")
+            .arg(home)
+            .args(["--batch", "--no-tty", "--status-fd", "1", "--verify"])
+            .arg(manifest)
+            .output()
+            .map_err(|e| format!("gpg: {e}"))?;
+        let status = String::from_utf8_lossy(&out.stdout);
+        if status.contains("[GNUPG:] VALIDSIG") && out.status.success() {
+            return Ok(());
+        }
+        if status.contains("EXPKEYSIG") {
+            warn("the signing key has expired; update sec-keys/openpgp-keys-gentoo-release");
+        }
+        Err(format!("bad OpenPGP signature on {}", manifest.display()))
+    })
 }
 
 fn strip_pgp(text: &str) -> String {

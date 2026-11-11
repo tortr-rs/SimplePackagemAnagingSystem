@@ -20,7 +20,8 @@ It shares Portage's on-disk formats, so the two can manage the same system:
 
 ```
 hoard install <pkg...>     install (-p pretend, -1 oneshot, -u -D -N, -n, -f fetch only,
-                           -g use binaries, -S build everything from source)
+                           -g use binaries, -k use own builds, -b save builds as binaries,
+                           -S build everything from source, -jN parallel builds)
 hoard upgrade              update everything (install -uDN @world)
 hoard remove <pkg...>      uninstall
 hoard autoremove           uninstall what @world/@system no longer needs
@@ -29,7 +30,7 @@ hoard search <regex>       search names (-d: descriptions too)
 hoard info <pkg>           versions, masks, keywords, USE
 hoard list | files | owns  query installed packages
 hoard env-update           regenerate /etc/profile.env, csh.env, ld.so.conf
-hoard verify [repo]        check a tree against its signed Manifests
+hoard verify [repo]        check a tree's signed Manifests, or a git repo's commit signature
 ```
 
 Package names without a category work (`hoard install tree` asks if it is ambiguous).
@@ -56,6 +57,24 @@ Package names without a category work (`hoard install tree` asks if it is ambigu
   then the package's own Manifest is verified with the Gentoo release key before anything is
   unpacked. Build dependencies of binaries are skipped (unless `--with-bdeps=y`), and sub-slot
   rebuilds only take a binary that was built against the new sub-slot.
+- **Your own binary packages** (`FEATURES=buildpkg` or `-b`): every source build is also saved as a
+  `.gpkg.tar` in `PKGDIR` with a Portage-format `Packages` index (Portage's `--usepkg` can use them).
+  hoard reinstalls from them instead of rebuilding whenever version and USE match.
+- **Parallel builds** (`-jN`, or `--jobs=N` in `EMERGE_DEFAULT_OPTS`): independent packages build at
+  the same time in separate processes; a package starts once everything it depends on is merged,
+  and merges happen one at a time. Distfile downloads are locked per file.
+- **preserve-libs**: when an upgrade would delete a shared library that installed programs still link
+  against (from their `NEEDED.ELF.2`), the library is kept, recorded in Portage's
+  `preserved_libs_registry`, and listed by `@preserved-rebuild`; once nothing needs it, it is removed.
+  hoard writes `NEEDED.ELF.2`/`PROVIDES`/`REQUIRES` for its own builds with a built-in ELF reader that
+  matches Portage's output.
+- **Configuration changes** (autounmask): when nothing satisfies a dependency, hoard works out the
+  cheapest fix (a `package.use` line, a `~arch` keyword or a license, never a `package.mask`
+  override), shows it, and writes it to `/etc/portage/package.*/zz-hoard-autounmask` after you
+  confirm (`--autounmask-write` to allow it together with `-y`).
+- **Git repositories**: `sync-git-verify-commit-signature` / `sync-openpgp-key-path` from repos.conf
+  are honoured (on by default for ::gentoo); a pull whose newest commit isn't validly signed is
+  rolled back.
 - **Ebuild environment** (`src/ebuild.sh`): `inherit`/`EXPORT_FUNCTIONS` with metadata accumulation,
   every PMS helper for EAPI 7, 8 and 9 (`econf`, `emake`, `unpack`, `eapply`, `eapply_user`,
   `do*`/`new*`, `dosym -r`, `einstalldocs`, `ver_*`, `ver_replacing`, `edo`, `pipestatus`, `has_version`, ...),
@@ -71,9 +90,9 @@ Package names without a category work (`hoard install tree` asks if it is ambigu
 
 ## Not implemented (yet)
 
-Building your own binary packages (`buildpkg`), `preserve-libs`, parallel builds of several packages, `@sets` other than
-`@world`/`@system`/`@selected`, signature checks for git-synced repositories, and automatic
-writing of USE/keyword changes (hoard prints the line to add instead).
+`@sets` other than `@world`/`@system`/`@selected`/`@preserved-rebuild`, signing your own binary
+packages, `--keep-going` after a failed build in parallel mode, and signature checks for git
+repositories whose mirrors don't sign commits (such as ::guru from gentoo-mirror).
 
 ## Building
 

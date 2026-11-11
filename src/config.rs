@@ -25,7 +25,7 @@ ACCEPT_RESTRICT="*"
 DISTDIR="/var/cache/distfiles"
 PKGDIR="/var/cache/binpkgs"
 PORTAGE_TMPDIR="/var/tmp"
-FEATURES="config-protect-if-modified network-sandbox protect-owned sandbox strict userpriv usersandbox"
+FEATURES="buildpkg-live config-protect-if-modified network-sandbox preserve-libs protect-owned sandbox strict userpriv usersandbox"
 COLLISION_IGNORE="/lib/modules/* *.py[co] *$py.class"
 UNINSTALL_IGNORE="/lib/modules/*"
 PORTAGE_COMPRESS="bzip2"
@@ -193,7 +193,7 @@ fn atoms_incremental(path: &Path, list: &mut Vec<(Atom, String)>) {
 
 impl Config {
     pub fn load(root: &Path) -> Result<Config, String> {
-        let config_root = PathBuf::from("/");
+        let config_root = PathBuf::from(std::env::var("PORTAGE_CONFIGROOT").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/".into()));
         let repos = Repos::load(&config_root)?;
         let etc = config_root.join("etc/portage");
 
@@ -690,6 +690,56 @@ impl Config {
             }
         }
         None
+    }
+
+    /// Apply a proposed package.use / accept_keywords / license line in memory.
+    pub fn apply_change(&mut self, c: &crate::autounmask::Change) -> Result<(), String> {
+        use crate::autounmask::Kind;
+        let entry = (Atom::parse(&c.atom)?, c.tokens.clone());
+        match c.kind {
+            Kind::Use => self.pkg_use_user.push(entry),
+            Kind::Keywords => self.pkg_keywords.push(entry),
+            Kind::License => self.pkg_license.push(entry),
+        }
+        Ok(())
+    }
+
+    /// Licenses of `e` that ACCEPT_LICENSE / package.license don't accept
+    /// (for an || group, its first choice).
+    pub fn unaccepted_licenses(&self, e: &Ebuild) -> Vec<String> {
+        let u = self.pkg_use(e);
+        let lic = depspec::parse(e.meta.get("LICENSE")).unwrap_or_default();
+        let lic = depspec::reduce(&lic, &u.enabled);
+        let mut toks = self.accept_license.clone();
+        for (a, t) in &self.pkg_license {
+            if Self::matches(a, e) {
+                toks.extend(t.iter().cloned());
+            }
+        }
+        let mut out = Vec::new();
+        self.collect_unaccepted(&lic, &toks, &mut out);
+        out
+    }
+
+    fn collect_unaccepted(&self, nodes: &[depspec::Node], toks: &[String], out: &mut Vec<String>) {
+        for n in nodes {
+            match n {
+                depspec::Node::Leaf(l) => {
+                    if !self.license_accepted(l, toks) && !out.contains(l) {
+                        out.push(l.clone());
+                    }
+                }
+                depspec::Node::Any(c) => {
+                    if !c.iter().any(|x| self.unaccepted_license(std::slice::from_ref(x), toks).is_none()) {
+                        if let Some(first) = c.first() {
+                            self.collect_unaccepted(std::slice::from_ref(first), toks, out);
+                        }
+                    }
+                }
+                depspec::Node::All(c) => self.collect_unaccepted(c, toks, out),
+                _ => {}
+            }
+        }
     }
 
     /// Variables from /etc/portage/env files selected by package.env.

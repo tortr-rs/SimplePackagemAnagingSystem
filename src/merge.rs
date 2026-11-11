@@ -359,6 +359,27 @@ fn resolve_slot_ops(nodes: &[Node], vdb: &Vdb) -> Vec<Node> {
 }
 
 fn write_vdb(cfg: &Config, e: &Ebuild, use_: &UseInfo, build: &Build, contents: &[Entry], dir: &Path) -> Result<(), String> {
+    write_metadata(cfg, e, use_, build, dir)?;
+    let w = |k: &str, v: &str| -> Result<(), String> {
+        std::fs::write(dir.join(k), format!("{v}\n")).map_err(|err| format!("{k}: {err}"))
+    };
+    w("COUNTER", &crate::vdb::next_counter(&cfg.root).to_string())?;
+    let size: u64 = contents
+        .iter()
+        .filter_map(|c| match c {
+            Entry::Obj { path, .. } => std::fs::metadata(root_path(&cfg.root, path)).ok().map(|m| m.len()),
+            _ => None,
+        })
+        .sum();
+    w("SIZE", &size.to_string())?;
+    let text: String = contents.iter().map(|c| format!("{}\n", c.line())).collect();
+    std::fs::write(dir.join("CONTENTS"), text).map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+/// Everything recorded about a built package except what depends on where it
+/// was merged (CONTENTS, COUNTER, SIZE): shared by the VDB and binary packages.
+pub fn write_metadata(cfg: &Config, e: &Ebuild, use_: &UseInfo, build: &Build, dir: &Path) -> Result<(), String> {
     let vdb = Vdb::load(&cfg.vdb_path());
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let w = |k: &str, v: &str| -> Result<(), String> {
@@ -398,16 +419,7 @@ fn write_vdb(cfg: &Config, e: &Ebuild, use_: &UseInfo, build: &Build, contents: 
     w("IUSE_EFFECTIVE", &join(&eff))?;
     w("USE", &join(&on))?;
     w("repository", &e.repo_name)?;
-    w("COUNTER", &crate::vdb::next_counter(&cfg.root).to_string())?;
     w("BUILD_TIME", &crate::util::now().to_string())?;
-    let size: u64 = contents
-        .iter()
-        .filter_map(|c| match c {
-            Entry::Obj { path, .. } => std::fs::metadata(root_path(&cfg.root, path)).ok().map(|m| m.len()),
-            _ => None,
-        })
-        .sum();
-    w("SIZE", &size.to_string())?;
     for k in ["CBUILD", "CHOST", "CFLAGS", "CXXFLAGS", "LDFLAGS"] {
         // a binary package records the flags it was really built with
         let from_bin = build.bin_meta.as_ref().and_then(|m| std::fs::read_to_string(m.join(k)).ok());
@@ -419,18 +431,16 @@ fn write_vdb(cfg: &Config, e: &Ebuild, use_: &UseInfo, build: &Build, contents: 
             w(k, v)?;
         }
     }
-    if let Some(m) = &build.bin_meta {
-        for k in ["NEEDED", "NEEDED.ELF.2", "REQUIRES", "PROVIDES", "BUILD_ID"] {
-            if let Ok(s) = std::fs::read(m.join(k)) {
-                std::fs::write(dir.join(k), s).map_err(|err| format!("{k}: {err}"))?;
-            }
+    // ELF data: from the binary package, or from scanning the image after the build
+    let elf_src = build.bin_meta.clone().unwrap_or_else(|| build.builddir.join("elfmeta"));
+    for k in ["NEEDED", "NEEDED.ELF.2", "REQUIRES", "PROVIDES", "BUILD_ID"] {
+        if let Ok(s) = std::fs::read(elf_src.join(k)) {
+            std::fs::write(dir.join(k), s).map_err(|err| format!("{k}: {err}"))?;
         }
     }
     let mut feats: Vec<&String> = cfg.features.iter().collect();
     feats.sort();
     w("FEATURES", &join(&feats))?;
-    let text: String = contents.iter().map(|c| format!("{}\n", c.line())).collect();
-    std::fs::write(dir.join("CONTENTS"), text).map_err(|err| err.to_string())?;
     std::fs::copy(&e.path, dir.join(format!("{}.ebuild", e.pf()))).map_err(|err| err.to_string())?;
     // environment.bz2
     let env = std::fs::read(&build.env_file).unwrap_or_default();
@@ -569,12 +579,38 @@ pub fn install(cfg: &Config, e: &Ebuild, use_: &UseInfo, build: &Build, quiet: b
 
     // take the old version(s) out
     let keep: HashSet<PathBuf> = res.contents.iter().map(|c| canon.get(&root_path(&cfg.root, c.path()))).collect();
+    let new_paths: HashSet<&str> = res.contents.iter().map(|c| c.path()).collect();
+    let new_needed = std::fs::read_to_string(merging.join("NEEDED.ELF.2")).unwrap_or_default();
+    let new_provides = std::fs::read_to_string(merging.join("PROVIDES")).unwrap_or_default();
     for o in &old {
         info(&format!("Unmerging old {}", o.cpv()));
         let work = build.temp.join(format!("old-{}", o.pf()));
         run_installed_phases(cfg, o, "prerm", Some(&e.ver.to_string()), &work);
         let others = other_owned(cfg, &vdb, &[o.cpv(), e.cpv()], &mut canon);
+        // preserve-libs: old libraries that installed programs still link against stay
+        let removed: HashSet<String> = o
+            .contents()
+            .iter()
+            .filter(|c| !matches!(c, Entry::Dir(_)) && !new_paths.contains(c.path()))
+            .map(|c| c.path().to_string())
+            .collect();
+        let preserved = crate::preserve::select(cfg, &vdb, o, &e.cpv(), &removed, &new_needed, &new_provides);
+        let mut keep = keep.clone();
+        for p in &preserved {
+            keep.insert(canon.get(&root_path(&cfg.root, p.path())));
+        }
         unmerge_files(cfg, &o.contents(), &keep, &others, &mut canon, false);
+        if !preserved.is_empty() {
+            let mut text = std::fs::read_to_string(merging.join("CONTENTS")).unwrap_or_default();
+            for p in &preserved {
+                text.push_str(&format!("{}\n", p.line()));
+                info(&format!("Preserving {} (still used by installed programs)", p.path()));
+            }
+            std::fs::write(merging.join("CONTENTS"), text).map_err(|err| err.to_string())?;
+            let counter = std::fs::read_to_string(merging.join("COUNTER")).unwrap_or_default();
+            let paths: Vec<String> = preserved.iter().map(|p| p.path().to_string()).collect();
+            crate::preserve::register(cfg, &format!("{}:{}", e.cp(), e.slot()), &e.cpv(), counter.trim(), &paths)?;
+        }
         run_installed_phases(cfg, o, "postrm", Some(&e.ver.to_string()), &work);
         if o.dir != final_dir {
             let _ = std::fs::remove_dir_all(&o.dir);

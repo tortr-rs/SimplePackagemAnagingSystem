@@ -170,6 +170,8 @@ pub fn fetch(cfg: &Config, e: &Ebuild, use_: &UseInfo, files: &[Distfile]) -> Re
     let fetch_restricted = restrict_has(e, use_, "fetch");
     for d in files {
         let path = dir.join(&d.name);
+        // parallel jobs may want the same file: one downloads, the others wait
+        let _lock = crate::util::lock(&dir.join(".locks").join(format!("{}.lock", d.name)))?;
         if d.size.is_none() {
             return Err(format!("{}: no Manifest entry for {}", e.cpv(), d.name));
         }
