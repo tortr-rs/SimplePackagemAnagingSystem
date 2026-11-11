@@ -141,10 +141,20 @@ fn parse_args(raw: &[String]) -> Args {
 fn main() {
     let mut raw: Vec<String> = std::env::args().skip(1).collect();
     let mut root = PathBuf::from("/");
-    if let Some(i) = raw.iter().position(|a| a == "--root") {
-        if i + 1 < raw.len() {
+    if let Some(i) = raw.iter().position(|a| a == "--root" || a.starts_with("--root=")) {
+        if let Some(v) = raw[i].strip_prefix("--root=") {
+            root = PathBuf::from(v);
+            raw.remove(i);
+        } else if i + 1 < raw.len() {
             root = PathBuf::from(&raw[i + 1]);
             raw.drain(i..i + 2);
+        } else {
+            eprintln!("!!! --root needs a directory");
+            std::process::exit(1);
+        }
+        if root.as_os_str().is_empty() {
+            eprintln!("!!! --root needs a directory");
+            std::process::exit(1);
         }
     }
     if raw.is_empty() || raw[0] == "help" || raw[0] == "--help" || raw[0] == "-h" {
