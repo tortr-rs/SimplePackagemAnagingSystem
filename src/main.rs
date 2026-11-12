@@ -62,6 +62,13 @@ commands:
       -q, --quiet           hide build output (it is still logged)
       -jN, --jobs=N         build up to N packages at once (default: from
                             EMERGE_DEFAULT_OPTS, else 1)
+      --keep-going          after a failure, go on with everything that
+                            doesn't depend on the failed package
+      --resume              carry on after a failed run; a failed build
+                            continues from the phase it stopped in
+      --skipfirst           (with --resume) leave out the package that failed
+      --fresh               throw away earlier failed builds, start over
+  resume                  same as install --resume
   upgrade, up             update the whole system (install -uDN @world)
   remove, rm  <pkg...>    uninstall packages            (-p, -y, --force)
   autoremove              uninstall packages nothing needs any more (-p, -y)
@@ -107,6 +114,8 @@ fn parse_args(raw: &[String]) -> Args {
             'q' => "quiet",
             'v' => "verbose",
             'd' => "description",
+            'a' => "ask",
+            't' => "tree",
             _ => return None,
         })
     };
@@ -136,6 +145,28 @@ fn parse_args(raw: &[String]) -> Args {
         }
     }
     Args { flags, pos }
+}
+
+/// Every option hoard understands. Anything else is an error, so a mistyped
+/// option can't quietly do something other than what was asked.
+fn check_flags(a: &Args) -> Result<(), String> {
+    const KNOWN: &[&str] = &[
+        "pretend", "yes", "oneshot", "update", "deep", "newuse", "noreplace", "nodeps", "fetchonly", "getbinpkg",
+        "buildpkg", "usepkg", "source", "quiet", "verbose", "description", "check", "force", "fresh", "resume",
+        "skipfirst", "keep-going", "keep-going=y", "keep-going=n", "with-bdeps=y", "with-bdeps=n", "autounmask=y",
+        "autounmask=n", "autounmask-write", "autounmask-write=y",
+        // emerge options that change nothing here, accepted so old habits work
+        "ask", "tree", "color=y", "color=n", "ask=y", "verbose=y",
+    ];
+    for f in &a.flags {
+        let ok = KNOWN.contains(&f.as_str())
+            || f.strip_prefix("jobs=").map(|n| n.parse::<usize>().is_ok()).unwrap_or(false);
+        if !ok {
+            let shown = if f.chars().count() == 1 { format!("-{f}") } else { format!("--{f}") };
+            return Err(format!("unknown option {shown} (see hoard help)"));
+        }
+    }
+    Ok(())
 }
 
 fn main() {
@@ -169,7 +200,8 @@ fn main() {
     let code = if cmd == "__internal" {
         internal(&raw, &root)
     } else {
-        match run(&cmd, &parse_args(&raw), &root) {
+        let args = parse_args(&raw);
+        match check_flags(&args).and_then(|_| run(&cmd, &args, &root)) {
             Ok(c) => c,
             Err(e) => {
                 error(&e);
@@ -183,7 +215,7 @@ fn main() {
 
 /// One parallel job: build (or unpack) a package and leave it ready for merging.
 fn build_one(args: &[String], root: &Path) -> Result<(), String> {
-    let (cpv, repo, kind, path, buildpkg) = (&args[0], &args[1], &args[2], &args[3], args[4] == "1");
+    let (cpv, repo, kind, path, buildpkg, fresh) = (&args[0], &args[1], &args[2], &args[3], args[4] == "1", args[5] == "1");
     let cfg = Config::load(root)?;
     let at = Atom::parse(&format!("={cpv}")).map_err(|_| format!("bad cpv {cpv}"))?;
     let ver = at.version.clone().ok_or_else(|| format!("bad cpv {cpv}"))?;
@@ -197,7 +229,7 @@ fn build_one(args: &[String], root: &Path) -> Result<(), String> {
     let u = cfg.pkg_use(&e);
     let vdb = Vdb::load(&cfg.vdb_path());
     let replacing: Vec<String> = vdb.pkgs.iter().filter(|p| p.cp() == e.cp() && p.slot == e.slot()).map(|p| p.ver.to_string()).collect();
-    let bopts = build::BuildOpts { replacing, quiet: true };
+    let bopts = build::BuildOpts { replacing, quiet: true, fresh };
     let b = match kind.as_str() {
         "src" => {
             let b = build::build(&cfg, &e, &u, &bopts)?;
@@ -250,7 +282,7 @@ fn internal(args: &[String], root: &Path) -> i32 {
             }
             if m.is_empty() { 1 } else { 0 }
         }
-        Some("build-one") if args.len() == 6 => match build_one(&args[1..], root) {
+        Some("build-one") if args.len() == 7 => match build_one(&args[1..], root) {
             Ok(()) => 0,
             Err(e) => {
                 error(&e);
@@ -272,6 +304,8 @@ fn need_root() -> Result<(), String> {
 
 fn run(cmd: &str, a: &Args, root: &Path) -> Result<i32, String> {
     match cmd {
+        "install" | "i" if a.flags.contains("resume") => cmd_resume(root, a),
+        "resume" => cmd_resume(root, a),
         "install" | "i" => {
             cmd_install(Config::load(root)?, a, &a.pos)
         }
@@ -625,12 +659,26 @@ fn cmd_install(mut cfg: Config, a: &Args, targets: &[String]) -> Result<i32, Str
             }
         }
     };
+    let mut plan = plan;
+    // --resume: what an earlier run already merged (and with --skipfirst, what failed) is left out
+    let skip: Vec<&str> = a.flags.iter().filter_map(|f| f.strip_prefix("resume-skip=")).collect();
+    if !skip.is_empty() {
+        let before = plan.order.len();
+        plan.order.retain(|&i| !skip.contains(&plan.nodes[i].e.cpv().as_str()));
+        if plan.order.len() < before {
+            info(&format!("Leaving out {} package(s) the earlier run already handled", before - plan.order.len()));
+        }
+    }
+    let plan = plan;
     let cfg = &cfg;
     for w in &plan.warnings {
         warn(w);
     }
     if plan.order.is_empty() {
         info("Nothing to merge; everything is up to date.");
+        if !pretend && a.flags.iter().any(|f| f.starts_with("resume-skip=")) {
+            let _ = std::fs::remove_file(RESUME_FILE);
+        }
         if !pretend && !a.flags.contains("oneshot") {
             add_world(cfg, &world_add)?;
         }
@@ -676,7 +724,9 @@ fn cmd_install(mut cfg: Config, a: &Args, targets: &[String]) -> Result<i32, Str
     let fetchonly = a.flags.contains("fetchonly");
     let quiet = a.flags.contains("quiet");
     let jobs = job_count(a, cfg);
+    let keep_going = wants(a, cfg, "keep-going");
     let mut elogs: Vec<(String, PathBuf)> = Vec::new();
+    let mut outcome = Outcome::default();
     let ok = if fetchonly {
         let count = plan.order.len();
         for (k, &i) in plan.order.iter().enumerate() {
@@ -691,10 +741,13 @@ fn cmd_install(mut cfg: Config, a: &Args, targets: &[String]) -> Result<i32, Str
         }
         true
     } else if jobs > 1 {
-        run_parallel(cfg, a, &plan, &world_add, jobs, buildpkg, root_of(cfg), &mut elogs)?
+        run_parallel(cfg, a, &plan, &world_add, jobs, buildpkg, keep_going, root_of(cfg), &mut elogs, &mut outcome)?
     } else {
-        run_sequential(cfg, a, &plan, &world_add, quiet, buildpkg, &mut elogs)?
+        run_sequential(cfg, a, &plan, &world_add, quiet, buildpkg, keep_going, &mut elogs, &mut outcome)?
     };
+    if !fetchonly {
+        save_resume(a, targets, &outcome);
+    }
     if !fetchonly {
         if let Err(e) = preserve::prune(cfg) {
             warn(&format!("preserved libraries: {e}"));
@@ -770,6 +823,7 @@ fn after_merge(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_sequential(
     cfg: &Config,
     a: &Args,
@@ -777,16 +831,26 @@ fn run_sequential(
     world_add: &[String],
     quiet: bool,
     buildpkg: bool,
+    keep_going: bool,
     elogs: &mut Vec<(String, PathBuf)>,
+    outcome: &mut Outcome,
 ) -> Result<bool, String> {
     let count = plan.order.len();
+    let pos: std::collections::HashMap<usize, usize> = plan.order.iter().enumerate().map(|(k, &i)| (i, k)).collect();
+    let mut bad: HashSet<usize> = HashSet::new();
     for (k, &i) in plan.order.iter().enumerate() {
         let n = &plan.nodes[i];
+        if let Some(&(c, _)) = n.deps.iter().find(|&&(c, kind)| kind != resolve::DepKind::P && bad.contains(&c) && pos.get(&c).map(|&pc| pc < k).unwrap_or(false)) {
+            warn(&format!("skipping {}: it needs {}, which failed", n.e.cpv(), plan.nodes[c].e.cpv()));
+            bad.insert(i);
+            outcome.skipped.push(n.e.cpv());
+            continue;
+        }
         let how = if n.binpkg.is_some() { "Installing (binary)" } else { "Emerging" };
         info(&format!("({}/{count}) {how} {}", k + 1, bold(&n.e.cpv())));
         let vdb_now = Vdb::load(&cfg.vdb_path());
         let replacing: Vec<String> = vdb_now.pkgs.iter().filter(|p| p.cp() == n.e.cp() && p.slot == n.e.slot()).map(|p| p.ver.to_string()).collect();
-        let bopts = build::BuildOpts { replacing, quiet };
+        let bopts = build::BuildOpts { replacing, quiet, fresh: a.flags.contains("fresh") };
         let prepared = match &n.binpkg {
             Some(b) => build::from_binary(cfg, &n.e, &n.use_, b, &bopts),
             None => build::build(cfg, &n.e, &n.use_, &bopts),
@@ -801,22 +865,129 @@ fn run_sequential(
             merge::install(cfg, &n.e, &n.use_, &b, quiet).map(|_| b)
         });
         match res {
-            Ok(b) => after_merge(cfg, a, n, &b, world_add, elogs)?,
+            Ok(b) => {
+                after_merge(cfg, a, n, &b, world_add, elogs)?;
+                outcome.merged.push(n.e.cpv());
+            }
             Err(e) => {
                 error(&e);
                 let log = build_log(cfg, n);
                 if log.exists() {
                     error(&format!("build log: {}", log.display()));
                 }
+                outcome.failed.push(n.e.cpv());
+                bad.insert(i);
+                if keep_going {
+                    continue;
+                }
                 let rest: Vec<String> = plan.order[k + 1..].iter().map(|&j| plan.nodes[j].e.cpv()).collect();
                 if !rest.is_empty() {
                     warn(&format!("not merged because of this failure: {}", rest.join(" ")));
                 }
+                outcome.skipped.extend(rest);
                 return Ok(false);
             }
         }
     }
-    Ok(true)
+    Ok(outcome.failed.is_empty())
+}
+
+/// What a run did, for the summary and for --resume.
+#[derive(Default)]
+struct Outcome {
+    merged: Vec<String>,
+    failed: Vec<String>,
+    skipped: Vec<String>,
+}
+
+/// A yes/no option given on the command line or in EMERGE_DEFAULT_OPTS ("--name", "--name=y").
+fn wants(a: &Args, cfg: &Config, name: &str) -> bool {
+    if a.flags.contains(&format!("{name}=n")) {
+        return false;
+    }
+    if a.flags.contains(name) || a.flags.contains(&format!("{name}=y")) {
+        return true;
+    }
+    cfg.var("EMERGE_DEFAULT_OPTS").split_whitespace().any(|o| o == format!("--{name}") || o == format!("--{name}=y"))
+}
+
+const RESUME_FILE: &str = "/var/lib/spas/resume";
+
+/// After a failed run, remember the command and what got merged, so
+/// `hoard install --resume` can carry on. A clean run removes the file.
+fn save_resume(a: &Args, targets: &[String], o: &Outcome) {
+    if o.failed.is_empty() && o.skipped.is_empty() {
+        let _ = std::fs::remove_file(RESUME_FILE);
+        return;
+    }
+    let mut flags: Vec<&String> = a.flags.iter().filter(|f| !matches!(f.as_str(), "resume" | "skipfirst" | "fresh")).collect();
+    flags.sort();
+    let mut text = String::from("hoard-resume 1\n");
+    for f in flags {
+        text.push_str(&format!("flag {f}\n"));
+    }
+    for t in targets {
+        text.push_str(&format!("target {t}\n"));
+    }
+    for m in &o.merged {
+        text.push_str(&format!("merged {m}\n"));
+    }
+    for f in &o.failed {
+        text.push_str(&format!("failed {f}\n"));
+    }
+    let _ = std::fs::create_dir_all("/var/lib/spas");
+    if std::fs::write(RESUME_FILE, text).is_ok() {
+        let mut msg = String::new();
+        if !o.failed.is_empty() {
+            msg.push_str(&format!("failed: {}", o.failed.join(" ")));
+        }
+        if !o.skipped.is_empty() {
+            if !msg.is_empty() {
+                msg.push_str("; ");
+            }
+            msg.push_str(&format!("not merged: {}", o.skipped.join(" ")));
+        }
+        warn(&msg);
+        info("Run 'hoard install --resume' to carry on: failed builds continue where they stopped (--skipfirst leaves the failed package out, --fresh rebuilds from scratch)");
+    }
+}
+
+/// hoard install --resume / hoard resume
+fn cmd_resume(root: &Path, a: &Args) -> Result<i32, String> {
+    let text = std::fs::read_to_string(RESUME_FILE).map_err(|_| "there is nothing to resume".to_string())?;
+    let mut lines = text.lines();
+    if lines.next() != Some("hoard-resume 1") {
+        return Err(format!("{RESUME_FILE} is not a hoard resume file"));
+    }
+    let mut ra = Args { flags: HashSet::new(), pos: vec![] };
+    for l in lines {
+        let Some((k, v)) = l.split_once(' ') else { continue };
+        match k {
+            "flag" => {
+                ra.flags.insert(v.to_string());
+            }
+            "target" => ra.pos.push(v.to_string()),
+            "merged" => {
+                ra.flags.insert(format!("resume-skip={v}"));
+            }
+            "failed" if a.flags.contains("skipfirst") => {
+                ra.flags.insert(format!("resume-skip={v}"));
+            }
+            _ => {}
+        }
+    }
+    // options given now win (-y, --fresh, -q, -jN ...)
+    for f in &a.flags {
+        if !matches!(f.as_str(), "resume" | "skipfirst") {
+            ra.flags.insert(f.clone());
+        }
+    }
+    if ra.pos.is_empty() {
+        return Err("the resume file has no targets".into());
+    }
+    info(&format!("Resuming: hoard install {}", ra.pos.join(" ")));
+    let targets = ra.pos.clone();
+    cmd_install(Config::load(root)?, &ra, &targets)
 }
 
 /// Build up to `jobs` packages at once in child hoard processes; merge each one
@@ -829,8 +1000,10 @@ fn run_parallel(
     world_add: &[String],
     jobs: usize,
     buildpkg: bool,
+    keep_going: bool,
     root: &Path,
     elogs: &mut Vec<(String, PathBuf)>,
+    outcome: &mut Outcome,
 ) -> Result<bool, String> {
     #[derive(PartialEq, Clone, Copy)]
     enum St {
@@ -877,7 +1050,16 @@ fn run_parallel(
                 let child = std::process::Command::new(ebuild_env::self_exe())
                     .arg("--root")
                     .arg(root)
-                    .args(["__internal", "build-one", &n.e.cpv(), &n.e.repo_name, kind, &path, if buildpkg { "1" } else { "0" }])
+                    .args([
+                        "__internal",
+                        "build-one",
+                        &n.e.cpv(),
+                        &n.e.repo_name,
+                        kind,
+                        &path,
+                        if buildpkg { "1" } else { "0" },
+                        if a.flags.contains("fresh") { "1" } else { "0" },
+                    ])
                     .stdin(std::process::Stdio::null())
                     .stdout(out.try_clone().map_err(|e| e.to_string())?)
                     .stderr(out)
@@ -912,13 +1094,15 @@ fn run_parallel(
             Ok(b) => {
                 after_merge(cfg, a, n, &b, world_add, elogs)?;
                 let _ = std::fs::remove_file(job_log(n));
+                outcome.merged.push(n.e.cpv());
                 st.insert(i, St::Merged);
                 merged += 1;
                 info(&format!("Jobs: {merged} of {count} complete, {} running", running.len()));
             }
             Err(e) => {
                 st.insert(i, St::Failed);
-                stop = true;
+                outcome.failed.push(n.e.cpv());
+                stop = !keep_going;
                 error(&format!("{} failed{}", n.e.cpv(), if e.is_empty() { String::new() } else { format!(": {e}") }));
                 let jl = std::fs::read_to_string(job_log(n)).unwrap_or_default();
                 for l in jl.lines().rev().take(12).collect::<Vec<_>>().into_iter().rev() {
@@ -938,6 +1122,7 @@ fn run_parallel(
     if !left.is_empty() {
         warn(&format!("not merged because of the failure: {}", left.join(" ")));
     }
+    outcome.skipped.extend(left);
     Ok(!st.values().any(|s| *s == St::Failed))
 }
 

@@ -1065,6 +1065,8 @@ depend|phase)
 		source "${SPAS_ENV_IN}" || die "failed to load the saved environment"
 		eval "${__spas_fresh}"
 		unset __spas_fresh
+		# hoard lowered the job count after the build ran out of memory
+		[[ -n ${SPAS_MAKEOPTS} ]] && export MAKEOPTS=${SPAS_MAKEOPTS}
 	else
 		unset DEPEND RDEPEND BDEPEND PDEPEND IDEPEND IUSE REQUIRED_USE SLOT SRC_URI RESTRICT PROPERTIES \
 			HOMEPAGE LICENSE DESCRIPTION KEYWORDS INHERITED E_IUSE E_REQUIRED_USE E_DEPEND E_RDEPEND \

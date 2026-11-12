@@ -90,10 +90,25 @@ Package names without a category work (`hoard install tree` asks if it is ambigu
   `pkg_preinst/postinst/prerm/postrm` (also for packages Portage installed, from their saved environment),
   env-update and ldconfig.
 
+## When a build fails
+
+hoard keeps the build directory and remembers the run. `hoard install --resume` (or `hoard
+resume`) carries on: what was already merged is left out, and the failed package continues from
+the phase it stopped in, so a big package that died in compile goes straight back to compiling
+instead of unpacking and configuring again. `--skipfirst` leaves the failed package out,
+`--fresh` throws earlier work away. If the ebuild, USE, the sources or CFLAGS changed in the
+meantime, the build starts over by itself.
+
+`--keep-going` (also read from EMERGE_DEFAULT_OPTS) goes on with everything that doesn't depend
+on a failed package.
+
+When a compiler is killed for lack of memory (`Killed signal terminated program cc1plus` and the
+like), hoard halves the job count in MAKEOPTS and continues the same phase, down to `-j1`.
+
 ## Not implemented (yet)
 
 `@sets` other than `@world`/`@system`/`@selected`/`@preserved-rebuild`, signing your own binary
-packages, `--keep-going` after a failed build in parallel mode, and signature checks for git
+packages, and signature checks for git
 repositories whose mirrors don't sign commits (such as ::guru from gentoo-mirror).
 
 ## Installing

@@ -131,6 +131,109 @@ fn chown_r(p: &Path, uid: u32, gid: u32) {
 pub struct BuildOpts {
     pub replacing: Vec<String>,
     pub quiet: bool,
+    /// throw away an earlier failed build instead of continuing it
+    pub fresh: bool,
+}
+
+/// What decides whether an earlier, failed build of this package can be continued:
+/// the ebuild and its eclasses, USE, the sources and the compiler flags.
+/// MAKEOPTS is left out on purpose, so a retry with fewer jobs still matches.
+fn fingerprint(cfg: &Config, e: &Ebuild, use_: &UseInfo, a: &[String]) -> String {
+    let mut s = format!("{}::{}\n", e.cpv(), e.repo_name);
+    s.push_str(&std::fs::read_to_string(&e.path).unwrap_or_default());
+    s.push_str(e.meta.get("_eclasses_"));
+    s.push_str(e.meta.get("INHERITED"));
+    let mut on: Vec<&String> = use_.enabled.iter().collect();
+    on.sort();
+    for f in on {
+        s.push_str(f);
+        s.push(' ');
+    }
+    for k in ["CFLAGS", "CXXFLAGS", "LDFLAGS", "FFLAGS", "FCFLAGS", "RUSTFLAGS", "CHOST", "CBUILD", "ROOT"] {
+        s.push_str(&format!("\n{k}={}", cfg.var(k)));
+    }
+    for (k, v) in cfg.pkg_env_vars(e) {
+        s.push_str(&format!("\n{k}={v}"));
+    }
+    s.push_str(&a.join(" "));
+    crate::util::blake2b_str(&s)[..32].to_string()
+}
+
+/// Phases an earlier attempt finished, with the environment each one saved.
+fn read_progress(builddir: &Path, fp: &str) -> Vec<(String, PathBuf)> {
+    let Ok(text) = std::fs::read_to_string(builddir.join(".hoard-progress")) else { return vec![] };
+    let mut lines = text.lines();
+    if lines.next() != Some(fp) {
+        return vec![];
+    }
+    lines
+        .filter_map(|l| l.split_once(' '))
+        .map(|(p, e)| (p.to_string(), PathBuf::from(e)))
+        .filter(|(_, e)| e.exists())
+        .collect()
+}
+
+/// -jN in MAKEOPTS (or "-j N", "--jobs=N"); None if not set.
+fn makeopts_jobs(m: &str) -> Option<usize> {
+    let w: Vec<&str> = m.split_whitespace().collect();
+    for (i, t) in w.iter().enumerate() {
+        if let Some(n) = t.strip_prefix("--jobs=").or_else(|| t.strip_prefix("-j")).filter(|n| !n.is_empty()) {
+            return n.parse().ok();
+        }
+        if *t == "-j" || *t == "--jobs" {
+            return w.get(i + 1).and_then(|n| n.parse().ok());
+        }
+    }
+    None
+}
+
+fn set_makeopts_jobs(m: &str, jobs: usize) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut skip = false;
+    for t in m.split_whitespace() {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if t == "-j" || t == "--jobs" {
+            skip = true;
+            continue;
+        }
+        if t.starts_with("--jobs=") || (t.starts_with("-j") && t.len() > 2) {
+            continue;
+        }
+        out.push(t.to_string());
+    }
+    out.push(format!("-j{jobs}"));
+    out.join(" ")
+}
+
+/// Did the part of the build log written since `from` end with the kernel
+/// killing a compiler or linker for lack of memory?
+fn ran_out_of_memory(log: &Path, from: u64) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(log) else { return false };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = from.max(len.saturating_sub(256 * 1024));
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return false;
+    }
+    let mut buf = Vec::new();
+    let _ = f.read_to_end(&mut buf);
+    let t = String::from_utf8_lossy(&buf);
+    [
+        "Killed signal terminated program",
+        "fatal error: Killed",
+        "terminated with signal 9",
+        "virtual memory exhausted",
+        "out of memory allocating",
+        "LLVM ERROR: out of memory",
+        "memory allocation of",
+        "SIGKILL: kill",
+        "std::bad_alloc",
+    ]
+    .iter()
+    .any(|p| t.contains(p))
 }
 
 pub fn runner<'a>(cfg: &'a Config, env: Vec<(String, String)>, log: Option<PathBuf>, quiet: bool) -> Runner<'a> {
@@ -145,7 +248,20 @@ pub fn build(cfg: &Config, e: &Ebuild, use_: &UseInfo, opts: &BuildOpts) -> Resu
 
     let tmp = cfg.var("PORTAGE_TMPDIR");
     let builddir = PathBuf::from(if tmp.is_empty() { "/var/tmp" } else { tmp }).join("spas").join(&e.cat).join(e.pf());
-    if builddir.exists() {
+    let fp = fingerprint(cfg, e, use_, &a);
+    // an earlier attempt that got through unpack and prepare is continued
+    // from where it stopped; anything else starts over
+    let mut done = if opts.fresh { vec![] } else { read_progress(&builddir, &fp) };
+    if !done.iter().any(|(p, _)| p == "prepare") {
+        done.clear();
+    }
+    let resuming = !done.is_empty();
+    if resuming {
+        let names: Vec<&str> = done.iter().map(|(p, _)| p.as_str()).collect();
+        info(&format!("Continuing the earlier build of {} ({} already done)", crate::util::bold(&e.cpv()), names.join(", ")));
+        let _ = std::fs::remove_dir_all(builddir.join("image"));
+        let _ = std::fs::remove_file(builddir.join(".hoard-build"));
+    } else if builddir.exists() {
         std::fs::remove_dir_all(&builddir).map_err(|err| format!("{}: {err}", builddir.display()))?;
     }
     for d in ["work", "temp", "homedir", "distdir"] {
@@ -160,7 +276,10 @@ pub fn build(cfg: &Config, e: &Ebuild, use_: &UseInfo, opts: &BuildOpts) -> Resu
     if restrict_userpriv {
         r.portage_ids = None;
     }
-    if let Some((uid, gid)) = r.portage_ids {
+    if !resuming {
+        std::fs::write(builddir.join(".hoard-progress"), format!("{fp}\n")).map_err(|err| err.to_string())?;
+    }
+    if let Some((uid, gid)) = r.portage_ids.filter(|_| !resuming) {
         chown_r(&builddir, uid, gid);
         // the build user must be able to reach the build directory
         for p in builddir.ancestors().skip(1) {
@@ -180,22 +299,59 @@ pub fn build(cfg: &Config, e: &Ebuild, use_: &UseInfo, opts: &BuildOpts) -> Resu
     let phases_defined: Vec<String> = e.meta.get("DEFINED_PHASES").split_whitespace().map(|s| s.to_string()).collect();
     let test = cfg.feature("test") && !fetch::restrict_has(e, use_, "test");
 
-    let mut env_in: Option<PathBuf> = None;
-    let mut step = 0;
+    let mut env_in: Option<PathBuf> = done.last().map(|(_, e)| e.clone());
+    let progress = builddir.join(".hoard-progress");
+    let log = temp.join("build.log");
+    let mut step = std::fs::read_dir(&temp).map(|d| d.count()).unwrap_or(0);
     let mut run = |phase: &str, o: PhaseOpts, env_in: &mut Option<PathBuf>| -> Result<(), String> {
-        step += 1;
-        let out = temp.join(format!("environment.{step}.{phase}"));
-        r.phase(phase, o, env_in.as_deref(), Some(&out), &extra)?;
-        if let Some((uid, gid)) = r.portage_ids {
-            chown_r(&out, uid, gid);
+        if done.iter().any(|(p, _)| p == phase) {
+            return Ok(());
         }
-        *env_in = Some(out);
-        Ok(())
+        loop {
+            step += 1;
+            let out = temp.join(format!("environment.{step}.{phase}"));
+            let log_len = std::fs::metadata(&log).map(|m| m.len()).unwrap_or(0);
+            match r.phase(phase, o, env_in.as_deref(), Some(&out), &extra) {
+                Ok(()) => {
+                    if let Some((uid, gid)) = r.portage_ids {
+                        chown_r(&out, uid, gid);
+                    }
+                    if matches!(phase, "unpack" | "prepare" | "configure" | "compile" | "test") {
+                        let line = format!("{phase} {}\n", out.display());
+                        let _ = std::fs::OpenOptions::new().append(true).open(&progress).and_then(|mut f| {
+                            use std::io::Write;
+                            f.write_all(line.as_bytes())
+                        });
+                    }
+                    *env_in = Some(out);
+                    return Ok(());
+                }
+                Err(err) => {
+                    // a compiler killed for lack of memory: same build, fewer jobs
+                    let jobs = r.env.iter().find(|(k, _)| k == "MAKEOPTS").and_then(|(_, v)| makeopts_jobs(v)).unwrap_or(1);
+                    if matches!(phase, "compile" | "test" | "install") && jobs > 1 && ran_out_of_memory(&log, log_len) {
+                        let fewer = (jobs / 2).max(1);
+                        warn(&format!("the build ran out of memory with -j{jobs}; continuing it with -j{fewer}"));
+                        let m = r.env.iter().find(|(k, _)| k == "MAKEOPTS").map(|(_, v)| set_makeopts_jobs(v, fewer)).unwrap_or_default();
+                        r.env.retain(|(k, _)| k != "MAKEOPTS" && k != "SPAS_MAKEOPTS");
+                        r.env.push(("MAKEOPTS".into(), m.clone()));
+                        // the saved environment would bring the old value back
+                        r.env.push(("SPAS_MAKEOPTS".into(), m));
+                        if phase == "install" {
+                            let _ = std::fs::remove_dir_all(builddir.join("image"));
+                            let _ = std::fs::create_dir_all(builddir.join("image"));
+                        }
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
     };
     let root_opts = PhaseOpts { drop_privs: false, sandbox: false, no_network: false };
     let user = |net: bool| PhaseOpts { drop_privs: true, sandbox: sandbox && usersandbox, no_network: netsandbox && !net };
 
-    if phases_defined.iter().any(|p| p == "pretend") {
+    if !resuming && phases_defined.iter().any(|p| p == "pretend") {
         run("pretend", root_opts, &mut env_in)?;
     }
     info(&format!("Building {}", crate::util::bold(&e.cpv())));
