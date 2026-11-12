@@ -55,6 +55,7 @@ manage the system. Package names without a category are accepted; <b>hoard</b> a
 <dt>env-update</dt><dd>Regenerate <i>/etc/profile.env</i> and <i>ld.so.conf</i>.</dd>
 <dt>verify [repo]</dt><dd>Check a repository against its signed Manifests, or a git repository's commit signature.</dd>
 <dt>manifest pkg|dir</dt><dd>Write the DIST lines of an overlay package's Manifest, downloading new files.</dd>
+<dt>resume</dt><dd>Same as <b>install --resume</b>.</dd>
 <dt>self-update</dt><dd>Replace this hoard with the newest release (<b>--check</b>: only report). Refuses when hoard was installed as a package.</dd>
 </dl>
 
@@ -78,7 +79,18 @@ manage the system. Package names without a category are accepted; <b>hoard</b> a
 <dt>--with-bdeps=y|n</dt><dd>Also update/install build dependencies of installed packages (default: from EMERGE_DEFAULT_OPTS, else n).</dd>
 <dt>-q, --quiet</dt><dd>Hide build output (it is still logged).</dd>
 <dt>-jN, --jobs=N</dt><dd>Build up to N packages at once (default: from EMERGE_DEFAULT_OPTS, else 1).</dd>
+<dt>--keep-going</dt><dd>After a failed build, go on with every package that doesn't depend on it (also read from EMERGE_DEFAULT_OPTS).</dd>
+<dt>--resume</dt><dd>Carry on after a failed run: merged packages are left out, and a failed build continues from the phase it stopped in.</dd>
+<dt>--skipfirst</dt><dd>With <b>--resume</b>, leave out the package that failed.</dd>
+<dt>--fresh</dt><dd>Throw away earlier failed builds and start them over.</dd>
 </dl>
+
+<h2>FAILED BUILDS</h2>
+<div class="ind">A failed build keeps its directory under <i>/var/tmp/spas</i> and the run is saved in
+<i>/var/lib/spas/resume</i>. If the ebuild, USE, the sources or the compiler flags change before
+the next try, the build starts over. When the kernel kills a compiler for lack of memory, hoard
+halves the <b>-j</b> in MAKEOPTS and runs the same phase again, down to <b>-j1</b>. Unknown
+options are an error.</div>
 
 <h2>SETS</h2>
 <div class="ind"><b>@world</b>, <b>@system</b>, <b>@selected</b>, <b>@preserved-rebuild</b>.</div>
@@ -118,7 +130,7 @@ hoard owns /usr/bin/jq</pre>
 <div id="foot">
 SPAS is distributed under the <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/blob/master/LICENSE">2-clause BSD license</a>.
 Copyright &copy; 2026 torter.<br>
-$Date: 2026-11-11 $
+$Date: 2026-11-12 $
 </div>
 
 </div>

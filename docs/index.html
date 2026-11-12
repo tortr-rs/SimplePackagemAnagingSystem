@@ -54,6 +54,10 @@ match; the second is built from source. See <a href="features.html">Features</a>
 
 <h2>News</h2>
 <dl class="news">
+<dt><b>2026-11-12</b> &mdash; hoard 0.3.1 released</dt>
+<dd>A failed build no longer starts over: <tt>hoard install --resume</tt> continues the failed package
+from the phase it stopped in. When a compiler runs out of memory, hoard lowers the <tt>-j</tt> in MAKEOPTS
+and carries on. <tt>--keep-going</tt> works, also with <tt>-jN</tt>. Unknown options are now an error.</dd>
 <dt><b>2026-11-11</b> &mdash; hoard 0.3.0 released</dt>
 <dd>hoard is now a Gentoo package: add the <a href="https://github.com/tortr-rs/spas-overlay">spas overlay</a> and
 <tt>hoard install sys-apps/spas</tt>, after which <tt>hoard upgrade</tt> keeps it current.
@@ -80,7 +84,7 @@ checked to be identical to Portage's on a real desktop system.</dd>
 <div id="foot">
 SPAS is distributed under the <a href="https://github.com/tortr-rs/SimplePackagemAnagingSystem/blob/master/LICENSE">2-clause BSD license</a>.
 Copyright &copy; 2026 torter.<br>
-$Date: 2026-11-11 $
+$Date: 2026-11-12 $
 </div>
 
 </div>
