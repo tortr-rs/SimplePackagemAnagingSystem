@@ -34,7 +34,7 @@ and no Portage underneath, while staying compatible with everything Portage writ
 <p>Yes: <i>SimplePackagemAnagingSystem</i>, abbreviated SPAS.</p>
 
 <h3>Can I use it next to emerge?</h3>
-<p>Yes. Both read <tt>/etc/portage</tt> and write <tt>/var/db/pkg</tt> and the world file in the
+<p>Yes. SPAS reads <tt>/etc/spas</tt> when there is one and <tt>/etc/portage</tt> when there isn't, so a Portage machine is understood as it is. Both write <tt>/var/db/pkg</tt> and the world file in the
 same format, so packages installed by one are seen by the other. Binary packages, the
 preserved-libs registry and autounmask changes are shared too.</p>
 

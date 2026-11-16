@@ -97,14 +97,14 @@ options are an error.</div>
 
 <h2>ENVIRONMENT</h2>
 <dl>
-<dt>PORTAGE_CONFIGROOT</dt><dd>Read configuration from <i>$PORTAGE_CONFIGROOT/etc/portage</i> instead of <i>/etc/portage</i>.</dd>
+<dt>PORTAGE_CONFIGROOT</dt><dd>Read configuration from <i>$PORTAGE_CONFIGROOT/etc/spas</i> (or <i>etc/portage</i>) instead of <i>/etc/spas</i>.</dd>
 <dt>PORTAGE_BINHOST</dt><dd>Binary package host to use instead of the official Gentoo one.</dd>
 <dt>NO_COLOR</dt><dd>Disable colored output.</dd>
 </dl>
 
 <h2>FILES</h2>
 <dl>
-<dt>/etc/portage/</dt><dd>make.conf, package.*, repos.conf, make.profile: the same configuration Portage uses.</dd>
+<dt>/etc/spas/</dt><dd>make.conf, package.*, repos.conf, make.profile: the configuration Portage uses, kept here. If <i>/etc/spas</i> does not exist, <i>/etc/portage</i> is read instead.</dd>
 <dt>/var/db/pkg/</dt><dd>Installed package database.</dd>
 <dt>/var/lib/portage/world</dt><dd>Packages you asked for.</dd>
 <dt>/var/lib/portage/preserved_libs_registry</dt><dd>Libraries kept for programs that still need them.</dd>

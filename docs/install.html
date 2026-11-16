@@ -29,7 +29,7 @@
 <h2>1. As a Gentoo package (recommended)</h2>
 <p>hoard lives in its own small overlay as <tt>sys-apps/spas</tt>. Installed this way, it is
 updated like any other package, by hoard itself or by emerge.</p>
-<pre># cat &gt; /etc/portage/repos.conf/spas.conf &lt;&lt;'EOF'
+<pre># cat &gt; /etc/spas/repos.conf/spas.conf &lt;&lt;'EOF'
 [spas]
 location = /var/db/repos/spas
 sync-type = git
@@ -59,6 +59,8 @@ $ cd SimplePackagemAnagingSystem
 $ cargo build --release
 $ sudo install -m755 target/release/hoard /usr/local/bin/hoard</pre>
 <p>Needs Rust 1.85 or newer (edition 2024).</p>
+<p>For a musl system such as <a href="https://chamesle.org/">Chamesle</a>, build a static binary for the musl target
+(<tt>cargo build --release --target x86_64-unknown-linux-musl</tt>). There is no prebuilt one yet.</p>
 
 <h2>Requirements</h2>
 <ul>
@@ -66,8 +68,8 @@ $ sudo install -m755 target/release/hoard /usr/local/bin/hoard</pre>
 <li><tt>bash</tt> (ebuilds are bash), <tt>git</tt> and/or <tt>rsync</tt> for syncing, <tt>gpg</tt> for signature checks</li>
 <li>Optional: <tt>sys-apps/sandbox</tt>, used for builds when installed</li>
 </ul>
-<p>Nothing from Portage is needed. Configuration stays where it was:
-<tt>/etc/portage/make.conf</tt> and friends.</p>
+<p>Nothing from Portage is needed. Configuration is read from
+<tt>/etc/spas/make.conf</tt> and friends, or from <tt>/etc/portage</tt> on a machine that has only that.</p>
 
 <hr>
 <div id="foot">
