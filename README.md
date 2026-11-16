@@ -1,6 +1,6 @@
 # SimplePackagemAnagingSystem (SPAS)
 
-A native package manager for Gentoo, written in Rust. Its command is `hoard`.
+A native package manager for Gentoo and Chamesle, written in Rust. Its command is `hoard`.
 
 SPAS is an alternative to Portage, not a front end for it. It reads the Gentoo
 repositories, resolves dependencies, runs ebuilds in its own EAPI 7/8/9 bash
