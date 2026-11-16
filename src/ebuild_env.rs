@@ -168,9 +168,9 @@ fn bring_up_loopback() {
         for (i, b) in b"lo\0".iter().enumerate() {
             ifr.ifr_name[i] = *b as libc::c_char;
         }
-        if libc::ioctl(s, libc::SIOCGIFFLAGS, &mut ifr) == 0 {
+        if libc::ioctl(s, libc::SIOCGIFFLAGS as _, &mut ifr) == 0 {
             ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
-            libc::ioctl(s, libc::SIOCSIFFLAGS, &ifr);
+            libc::ioctl(s, libc::SIOCSIFFLAGS as _, &ifr);
         }
         libc::close(s);
     }

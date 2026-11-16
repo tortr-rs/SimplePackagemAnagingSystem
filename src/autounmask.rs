@@ -38,7 +38,7 @@ impl Change {
 /// Where a change of this kind goes: a file inside the package.* directory,
 /// or the package.* file itself when the user keeps a single file.
 pub fn target_file(config_root: &Path, c: &Change) -> PathBuf {
-    let p = config_root.join("etc/portage").join(c.file_name());
+    let p = crate::config::conf_dir(config_root).join(c.file_name());
     if p.is_file() { p } else { p.join("zz-hoard-autounmask") }
 }
 

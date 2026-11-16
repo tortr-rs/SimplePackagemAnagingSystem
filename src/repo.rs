@@ -150,7 +150,7 @@ fn repos_conf(config_root: &Path) -> BTreeMap<String, HashMap<String, String>> {
         .map(|(a, b)| (a.to_string(), b.to_string()))
         .collect(),
     );
-    let rc = config_root.join("etc/portage/repos.conf");
+    let rc = crate::config::conf_dir(config_root).join("repos.conf");
     let mut texts = Vec::new();
     if rc.is_dir() {
         for f in crate::util::sorted_config_files(&rc) {

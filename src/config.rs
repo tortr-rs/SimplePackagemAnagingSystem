@@ -68,6 +68,7 @@ impl UseState {
     }
 }
 
+#[derive(Clone)]
 pub struct UseInfo {
     /// IUSE names as declared (without +/-)
     pub iuse: Vec<String>,
@@ -80,6 +81,7 @@ pub struct UseInfo {
 type AtomList = Vec<(Atom, Vec<String>)>;
 
 pub struct Config {
+    use_memo: std::cell::RefCell<HashMap<(String, String, String, usize), UseInfo>>,
     pub root: PathBuf,
     pub config_root: PathBuf,
     pub repos: Repos,
@@ -191,17 +193,23 @@ fn atoms_incremental(path: &Path, list: &mut Vec<(Atom, String)>) {
     }
 }
 
+/// Where the configuration lives: /etc/spas, or /etc/portage on a machine that has only that.
+pub fn conf_dir(config_root: &Path) -> PathBuf {
+    let spas = config_root.join("etc/spas");
+    if spas.is_dir() { spas } else { config_root.join("etc/portage") }
+}
+
 impl Config {
     pub fn load(root: &Path) -> Result<Config, String> {
         let config_root = PathBuf::from(std::env::var("PORTAGE_CONFIGROOT").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/".into()));
         let repos = Repos::load(&config_root)?;
-        let etc = config_root.join("etc/portage");
+        let etc = conf_dir(&config_root);
 
         // ---- profile stack
         let mut profile_dirs = Vec::new();
         let mp = etc.join("make.profile");
         let mp = std::fs::canonicalize(&mp)
-            .map_err(|_| "no profile selected: /etc/portage/make.profile is missing".to_string())?;
+            .map_err(|_| "no profile selected: make.profile is missing from /etc/spas".to_string())?;
         walk_profile(&mp, &repos, &mut profile_dirs, 0)?;
         let user_profile = etc.join("profile");
         if user_profile.is_dir() {
@@ -424,6 +432,7 @@ impl Config {
         }
 
         Ok(Config {
+            use_memo: Default::default(),
             root: root.to_path_buf(),
             config_root,
             repos,
@@ -472,7 +481,7 @@ impl Config {
     }
 
     fn matches(a: &Atom, e: &Ebuild) -> bool {
-        a.matches_nouse(&e.target(None, None))
+        a.cat == e.cat && a.pn == e.pn && a.matches_nouse(&e.target(None, None))
     }
 
     /// Stable keyword for our arch present -> the use.stable.* files apply.
@@ -481,6 +490,16 @@ impl Config {
     }
 
     pub fn pkg_use(&self, e: &Ebuild) -> UseInfo {
+        let key = (e.cat.clone(), e.pn.clone(), e.ver.to_string(), e.repo);
+        if let Some(u) = self.use_memo.borrow().get(&key) {
+            return u.clone();
+        }
+        let u = self.pkg_use_uncached(e);
+        self.use_memo.borrow_mut().insert(key, u.clone());
+        u
+    }
+
+    fn pkg_use_uncached(&self, e: &Ebuild) -> UseInfo {
         let mut iuse = Vec::new();
         let mut state: HashMap<String, bool> = HashMap::new();
         for t in e.meta.get("IUSE").split_whitespace() {
@@ -748,7 +767,7 @@ impl Config {
         for (a, files) in &self.pkg_env {
             if Self::matches(a, e) {
                 for f in files {
-                    let p = self.config_root.join("etc/portage/env").join(f);
+                    let p = conf_dir(&self.config_root).join("env").join(f);
                     match shellvars::parse_file(&p, &self.vars) {
                         Ok(v) => out.extend(v),
                         Err(err) => warn(&err),

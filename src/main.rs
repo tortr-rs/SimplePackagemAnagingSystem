@@ -84,7 +84,7 @@ commands:
   self-update             replace this hoard with the newest GitHub release
                           (--check: only report; packaged hoard: use upgrade)
 
-Configuration is the same as Portage's: /etc/portage/make.conf, package.use,
+Configuration is Portage's, kept in /etc/spas (or /etc/portage): make.conf, package.use,
 package.accept_keywords, package.mask, repos.conf, the selected profile.
 Sets: @world, @system, @selected, @preserved-rebuild.
 ";
