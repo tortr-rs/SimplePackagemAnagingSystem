@@ -399,7 +399,7 @@ exeopts() { __SPAS_EXEOPTS=( "$@" ); }
 diropts() { __SPAS_DIROPTS=( "$@" ); }
 
 __spas_need_d() {
-	[[ -n ${ED} && ${EBUILD_PHASE} == install ]] || die "${FUNCNAME[1]} may only be used in src_install"
+	[[ -n ${ED} && ( ${EBUILD_PHASE} == install || ${EBUILD_PHASE} == preinst ) ]] || die "${FUNCNAME[1]} may only be used in src_install"
 }
 
 dodir() {
